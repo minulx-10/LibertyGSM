@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 
-from divert_engine import DivertEngine
+from divert_engine import DivertEngine, sniff_outbound_ports
 
 
 class LibertyGSMApp:
@@ -84,6 +84,13 @@ class LibertyGSMApp:
                  font=("Segoe UI", 9), fg="#6b7280", bg="#121214", wraplength=560, justify="left"
                  ).pack(anchor="w", pady=(8, 0))
 
+        # Diagnostic: find which (non-443) port a stuck site/game connects to.
+        self.sniff_btn = tk.Button(config, text="🔍 게임 포트 찾기 (30초 진단)",
+                                   font=("Segoe UI", 9, "bold"), bg="#2e2e38", fg="#d1d5db",
+                                   activebackground="#3e3e48", activeforeground="#ffffff",
+                                   bd=0, padx=12, pady=6, cursor="hand2", command=self.find_game_port)
+        self.sniff_btn.pack(anchor="w", pady=(10, 0))
+
         # --- Log console ---
         head = tk.Frame(main, bg="#121214")
         head.pack(fill=tk.X, pady=(10, 4))
@@ -122,6 +129,8 @@ class LibertyGSMApp:
                 kind, ok = self.result_queue.get_nowait()
                 if kind == "start":
                     self._finish_start(ok)
+                elif kind == "sniff":
+                    self.sniff_btn.config(state=tk.NORMAL, text="🔍 게임 포트 찾기 (30초 진단)")
         except queue.Empty:
             pass
 
@@ -145,6 +154,21 @@ class LibertyGSMApp:
         if self.engine:
             self.engine.mode = mode  # applies to the next connection immediately
         self.log_message(f"[{time.strftime('%H:%M:%S')}] [SYSTEM] Bypass intensity set to {mode}.")
+
+    def find_game_port(self):
+        self.sniff_btn.config(state=tk.DISABLED, text="진단 중... 막힌 게임을 새로고침하세요 (30초)")
+
+        def cb(msg, level="INFO"):
+            self.log_message(f"[{time.strftime('%H:%M:%S')}] [{level}] {msg}")
+
+        def worker():
+            try:
+                sniff_outbound_ports(cb, duration=30.0)
+            except Exception as exc:
+                cb(f"진단 오류: {exc}", "ERROR")
+            self.result_queue.put(("sniff", True))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def toggle(self):
         if self.is_running:

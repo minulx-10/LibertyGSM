@@ -31,7 +31,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pydivert
-from pydivert.consts import Direction
+from pydivert.consts import Direction, Flag
 
 from tls_frag import fragment_client_hello, sni_name, _TLS_HANDSHAKE
 
@@ -72,6 +72,63 @@ def _build_filter():
         f" or (tcp.SrcPort == {RELAY_PORT})"
         ")"
     )
+
+
+def _safe_close(handle):
+    try:
+        handle.close()
+    except Exception:
+        pass
+
+
+def sniff_outbound_ports(log, duration=30.0, standard_ports=(80, 443, 53),
+                         stop_event=None):
+    """Passively observe outbound TCP connection attempts and report the ones on
+    NON-standard ports -- used to discover which port a site's game/WebSocket
+    uses (e.g. KKuTu connects its game socket on a custom port, not 443).
+
+    Runs in SNIFF | RECV_ONLY mode: it only receives *copies* of packets and
+    never sends, drops, or rewrites anything, so it cannot affect connectivity.
+    Safe to run while the main engine is active. Requires Administrator.
+    """
+    seen = set()
+    try:
+        w = pydivert.WinDivert("outbound and ip and tcp.Syn and not tcp.Ack",
+                               flags=Flag.SNIFF | Flag.RECV_ONLY)
+        w.open()
+    except Exception as exc:
+        log(f"포트 진단 시작 실패: {exc} (관리자 권한으로 실행했는지 확인)", "ERROR")
+        return []
+
+    log(f"포트 진단 시작 — {int(duration)}초간 나가는 연결을 관찰합니다. "
+        f"지금 막힌 사이트(끄투 게임)를 새로고침하세요.")
+    timer = threading.Timer(duration, lambda: _safe_close(w))
+    timer.start()
+    nonstd = []
+    try:
+        while stop_event is None or not stop_event.is_set():
+            try:
+                p = w.recv()
+            except Exception:
+                break  # handle closed by the timer (or stop)
+            key = (p.dst_addr, p.dst_port)
+            if key in seen:
+                continue
+            seen.add(key)
+            if p.dst_port not in standard_ports:
+                nonstd.append(key)
+                log(f"  ★ 비표준 포트 연결: {p.dst_addr}:{p.dst_port}", "WARNING")
+    finally:
+        timer.cancel()
+        _safe_close(w)
+
+    if nonstd:
+        log(f"포트 진단 종료 — 비표준 포트 {len(nonstd)}건. 위 ★ 줄의 게임 서버 "
+            f"IP:포트를 알려주세요.")
+    else:
+        log("포트 진단 종료 — 비표준 포트가 안 잡혔습니다. 게임을 새로고침한 게 "
+            "맞는지 확인하고 다시 시도해 주세요. (게임이 443을 쓰면 IP 차단일 수 있음)")
+    return nonstd
 
 
 # --------------------------------------------------------------------------- #
