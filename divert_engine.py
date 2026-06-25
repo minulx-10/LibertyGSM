@@ -46,10 +46,14 @@ DOH_IPS = ["1.0.0.1", "1.1.1.1", "8.8.8.8", "8.8.4.4"]
 DOH_PATH = "/dns-query"           # 8.8.8.8 also serves wire-format here
 DOH_TIMEOUT = 5.0
 
-# Outbound TCP ports whose TLS ClientHello we fragment. 443 covers normal HTTPS;
-# add a site's game/WebSocket port here (e.g. KKuTu connects its game socket on a
-# non-443 port) and it gets the same SNI-fragmentation treatment.
-INTERCEPT_TCP_PORTS = [443]
+# Outbound TCP ports whose TLS ClientHello we fragment. 443 is normal HTTPS; the
+# rest are the common alternate HTTPS / WebSocket(wss) ports (8080 is what KKuTu's
+# game socket uses, 8443/8880 + the 20xx are Cloudflare's wss ports). All of these
+# are client-speaks-first (TLS/HTTP), so relaying them is safe. We deliberately do
+# NOT include server-speaks-first ports (SSH 22, SMTP 25, DB ports, ...) -- routing
+# those through the relay would stall them. Add a port here if a site needs it
+# (use the "게임 포트 찾기" diagnostic button to discover it).
+INTERCEPT_TCP_PORTS = [443, 8080, 8443, 8880, 2053, 2083, 2087, 2096]
 
 RELAY_PORT = 47443                # local HTTPS-splitting relay
 UPSTREAM_PORT_BASE = 30000        # relay -> server sockets bound here...
