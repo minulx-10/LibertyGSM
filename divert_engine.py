@@ -46,6 +46,11 @@ DOH_IPS = ["1.0.0.1", "1.1.1.1", "8.8.8.8", "8.8.4.4"]
 DOH_PATH = "/dns-query"           # 8.8.8.8 also serves wire-format here
 DOH_TIMEOUT = 5.0
 
+# Outbound TCP ports whose TLS ClientHello we fragment. 443 covers normal HTTPS;
+# add a site's game/WebSocket port here (e.g. KKuTu connects its game socket on a
+# non-443 port) and it gets the same SNI-fragmentation treatment.
+INTERCEPT_TCP_PORTS = [443]
+
 RELAY_PORT = 47443                # local HTTPS-splitting relay
 UPSTREAM_PORT_BASE = 30000        # relay -> server sockets bound here...
 UPSTREAM_PORT_COUNT = 2048        # ...so the kernel filter can exclude them
@@ -57,11 +62,12 @@ HTTPS_FIRST_READ_TIMEOUT = 8.0
 
 def _build_filter():
     doh_excl = "".join(f" and ip.DstAddr != {ip}" for ip in DOH_IPS)
+    ports = " or ".join(f"tcp.DstPort == {p}" for p in INTERCEPT_TCP_PORTS)
     return (
         "ip and ("
         "(outbound and udp.DstPort == 53)"
         " or (outbound and udp.DstPort == 443)"   # QUIC/HTTP3 -> dropped (force TCP)
-        f" or (outbound and tcp.DstPort == 443{doh_excl}"
+        f" or (outbound and ({ports}){doh_excl}"
         f" and (tcp.SrcPort < {UPSTREAM_PORT_BASE} or tcp.SrcPort > {_UPSTREAM_HI}))"
         f" or (tcp.SrcPort == {RELAY_PORT})"
         ")"
@@ -412,7 +418,7 @@ class DivertEngine:
         elif packet.tcp is not None:
             # TCP rewriting runs INLINE on the capture thread, so conn_map needs
             # no lock.
-            if packet.is_outbound and packet.dst_port == 443:
+            if packet.is_outbound and packet.dst_port in INTERCEPT_TCP_PORTS:
                 self._redirect_443(packet)
             elif packet.src_port == RELAY_PORT:
                 self._rewrite_relay_reply(packet)
