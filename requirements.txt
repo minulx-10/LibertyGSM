@@ -1,0 +1,3 @@
+# LibertyGSM (WinDivert engine) -- the only third-party dependency.
+# pydivert bundles the WinDivert64.dll + signed .sys driver.
+pydivert>=3.1.3

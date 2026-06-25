@@ -13,13 +13,16 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-echo [1/3] Installing PyInstaller if needed...
+echo [1/3] Installing dependencies (pydivert, PyInstaller)...
 python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 python -m pip install pyinstaller
 
 echo.
 echo [2/3] Building executable using PyInstaller...
-python -m PyInstaller --onefile --noconsole --name=LibertyGSM gui.py
+:: --uac-admin     : the .exe requests Administrator on launch (WinDivert needs it)
+:: --collect-all   : bundle pydivert's WinDivert64.dll + .sys driver into the exe
+python -m PyInstaller --onefile --noconsole --name=LibertyGSM --uac-admin --collect-all pydivert gui.py
 
 if %errorlevel% neq 0 (
     echo.
@@ -29,11 +32,12 @@ if %errorlevel% neq 0 (
 )
 
 echo.
-echo [3/3] Done! 
+echo [3/3] Done!
 echo ==========================================
 echo  Build complete!
 echo  Your executable is located at:
 echo  dist\LibertyGSM.exe
+echo  ^(Run it as Administrator -- it will prompt automatically.^)
 echo ==========================================
 echo.
 pause
