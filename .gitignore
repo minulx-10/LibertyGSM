@@ -16,3 +16,4 @@ dist/
 *.log
 Thumbs.db
 desktop.ini
+exclude_hosts.txt

@@ -33,7 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pydivert
 from pydivert.consts import Direction, Flag
 
-from tls_frag import fragment_client_hello, sni_name, _TLS_HANDSHAKE
+from tls_frag import fragment_client_hello, sni_name, _TLS_HANDSHAKE, load_exclude_hosts, is_host_excluded
 
 # --------------------------------------------------------------------------- #
 # Configuration
@@ -335,13 +335,17 @@ class _RelayHandler(socketserver.BaseRequestHandler):
         try:
             if hello[0] == _TLS_HANDSHAKE:
                 host = sni_name(hello)
-                records = fragment_client_hello(hello, engine.mode)
-                delay = engine.frag_delay()
-                engine.log(f"{host} -> {len(records)} TLS records ({engine.mode})")
-                for i, rec in enumerate(records):
-                    upstream.sendall(rec)
-                    if delay and i < len(records) - 1:
-                        time.sleep(delay)
+                if is_host_excluded(host, engine.exclude_hosts):
+                    engine.log(f"{host} -> fragmentation bypassed (whitelisted)")
+                    upstream.sendall(hello)
+                else:
+                    records = fragment_client_hello(hello, engine.mode)
+                    delay = engine.frag_delay()
+                    engine.log(f"{host} -> {len(records)} TLS records ({engine.mode})")
+                    for i, rec in enumerate(records):
+                        upstream.sendall(rec)
+                        if delay and i < len(records) - 1:
+                            time.sleep(delay)
             else:
                 upstream.sendall(hello)
         except OSError:
@@ -358,6 +362,8 @@ class _RelayHandler(socketserver.BaseRequestHandler):
                 engine.stats["https_reset"] += 1
                 engine.log(f"{host}: 0 bytes back after ClientHello -- DPI reset "
                            f"or IP block (browser retry may still succeed).", "WARNING")
+                if engine.event_callback:
+                    engine.event_callback("bypass_fail", host)
             else:
                 if engine.event_callback:
                     engine.event_callback("bypass_success", host)
@@ -378,6 +384,7 @@ class DivertEngine:
         self.event_callback = event_callback
         self.conn_map = {}                  # (src_addr,src_port)->(dst_addr,dst_port)
         self.doh = DohClient()
+        self.exclude_hosts = load_exclude_hosts()
         self.stats = {"dns": 0, "https_total": 0, "https_reset": 0, "quic": 0}
         self._stats_lock = threading.Lock()
         self._w = None

@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, scrolledtext
 import ctypes
+import os
 import queue
 import sys
 import threading
@@ -132,12 +133,21 @@ class LibertyGSMApp:
                      wraplength=560, justify="left").pack(anchor="w", pady=(6, 0))
 
 
-        # Diagnostic: find which (non-443) port a stuck site/game connects to.
-        self.sniff_btn = tk.Button(config, text="🔍 게임 포트 찾기 (30초 진단)",
+        # Buttons frame (Diagnostic + Excluded Hosts)
+        btn_frame = tk.Frame(config, bg="#121214")
+        btn_frame.pack(anchor="w", pady=(10, 0))
+
+        self.sniff_btn = tk.Button(btn_frame, text="🔍 게임 포트 찾기 (30초 진단)",
                                    font=("Segoe UI", 9, "bold"), bg="#2e2e38", fg="#d1d5db",
                                    activebackground="#3e3e48", activeforeground="#ffffff",
                                    bd=0, padx=12, pady=6, cursor="hand2", command=self.find_game_port)
-        self.sniff_btn.pack(anchor="w", pady=(10, 0))
+        self.sniff_btn.pack(side=tk.LEFT)
+
+        self.exclude_btn = tk.Button(btn_frame, text="🛠️ 제외 도메인 설정",
+                                     font=("Segoe UI", 9, "bold"), bg="#2e2e38", fg="#d1d5db",
+                                     activebackground="#3e3e48", activeforeground="#ffffff",
+                                     bd=0, padx=12, pady=6, cursor="hand2", command=self.open_exclude_hosts)
+        self.exclude_btn.pack(side=tk.LEFT, padx=(10, 0))
 
         # --- Log console ---
         head = tk.Frame(main, bg="#121214")
@@ -187,7 +197,13 @@ class LibertyGSMApp:
                 elif kind == "quit":
                     self._real_quit()
                 elif kind == "bypass_success":
-                    self.show_gui_toast(f"✨ 우회 성공: {item[1]}")
+                    domain = item[1]
+                    self.show_gui_toast(f"✨ 우회 성공: {domain}")
+                    self.spawn_floating_message(f"흐흐... [{domain}] 우회 성공...", True)
+                elif kind == "bypass_fail":
+                    domain = item[1]
+                    self.show_gui_toast(f"❌ 우회 실패: {domain}")
+                    self.spawn_floating_message(f"ㅠㅠ... [{domain}] 우회 실패...", False)
         except queue.Empty:
             pass
 
@@ -217,6 +233,79 @@ class LibertyGSMApp:
     def _clear_toast(self):
         self.toast_label.config(text="")
         self.toast_timer_id = None
+
+    def open_exclude_hosts(self):
+        import subprocess
+        from tls_frag import get_exclude_hosts_path, load_exclude_hosts
+        path = get_exclude_hosts_path()
+        load_exclude_hosts()  # ensures the file exists
+        try:
+            os.startfile(path)
+        except AttributeError:
+            subprocess.Popen(["notepad.exe", path])
+        except Exception as exc:
+            self.log_message(f"[{time.strftime('%H:%M:%S')}] [ERROR] exclude_hosts.txt 열기 실패: {exc}")
+
+    def spawn_floating_message(self, text, is_success):
+        import random
+        # Green for success, red for failure
+        fg_color = "#10b981" if is_success else "#ef4444"
+        bg_color = "#1e1e24"  # sleek card dark grey
+        border_color = "#3e3e48"
+
+        # Create a nice floating card/bubble with a 1px border
+        label = tk.Label(
+            self.root,
+            text=text,
+            font=("Segoe UI", 11, "bold"),
+            fg=fg_color,
+            bg=bg_color,
+            relief=tk.SOLID,
+            bd=1,
+            padx=10,
+            pady=6
+        )
+
+        # Random starting coordinates (within window bounds: 620x680)
+        start_x = random.randint(30, 320)
+        start_y = random.randint(250, 520)
+
+        try:
+            label.place(x=start_x, y=start_y)
+        except Exception:
+            return
+
+        steps = 60
+        step_ms = 25
+        y_velocity = -1.5
+
+        def animate(current_step, current_y):
+            if not self.is_running:
+                # If bypass is stopped, clean up the label
+                try:
+                    label.destroy()
+                except Exception:
+                    pass
+                return
+
+            if current_step >= steps:
+                try:
+                    label.destroy()
+                except Exception:
+                    pass
+                return
+
+            new_y = current_y + y_velocity
+            try:
+                label.place(y=int(new_y))
+                self.root.after(step_ms, animate, current_step + 1, new_y)
+            except Exception:
+                try:
+                    label.destroy()
+                except Exception:
+                    pass
+
+        animate(0, start_y)
 
     def clear_logs(self):
         self.console.config(state=tk.NORMAL)

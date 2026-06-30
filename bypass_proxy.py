@@ -8,6 +8,8 @@ import ssl
 import struct
 import random
 
+from tls_frag import load_exclude_hosts, is_host_excluded
+
 
 # Setup logger
 logger = logging.getLogger("LibertyGSM.bypass_proxy")
@@ -178,6 +180,7 @@ class BypassProxyServer:
         self.server_socket = None
         self.running = False
         self.dns_cache = {}
+        self.exclude_hosts = load_exclude_hosts()
         self.active_connections = 0
         self._lock = threading.Lock()
 
@@ -411,8 +414,12 @@ class BypassProxyServer:
         # Fragment only a genuine TLS ClientHello; forward anything else as-is.
         if len(hello_data) >= 5 and hello_data[0] == _TLS_HANDSHAKE:
             sni = sni_name(hello_data)
-            self.log(f"Intercepted ClientHello (SNI={sni}, {len(hello_data)}B). Applying {self.bypass_mode} record-layer fragmentation.", "INFO")
-            self._send_fragmented_tls(server_sock, hello_data)
+            if is_host_excluded(sni, self.exclude_hosts):
+                self.log(f"Intercepted ClientHello (SNI={sni}, {len(hello_data)}B). Fragmentation bypassed (whitelisted).", "INFO")
+                server_sock.sendall(hello_data)
+            else:
+                self.log(f"Intercepted ClientHello (SNI={sni}, {len(hello_data)}B). Applying {self.bypass_mode} record-layer fragmentation.", "INFO")
+                self._send_fragmented_tls(server_sock, hello_data)
         else:
             # Not TLS or unknown, send normally
             server_sock.sendall(hello_data)

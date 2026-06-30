@@ -13,12 +13,78 @@ Shared by both engines (the legacy userspace proxy and the WinDivert engine).
 
 from __future__ import annotations
 
+import os
 import random
 import struct
+import sys
 
 # Record-layer content type 0x16 == handshake; legal versions for a ClientHello.
 _TLS_HANDSHAKE = 0x16
 _TLS_VERSIONS = {0x0301, 0x0302, 0x0303, 0x0304}
+
+
+def get_exclude_hosts_path() -> str:
+    if getattr(sys, "frozen", False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        try:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+        except Exception:
+            base_dir = os.getcwd()
+    return os.path.join(base_dir, "exclude_hosts.txt")
+
+
+def load_exclude_hosts() -> set[str]:
+    path = get_exclude_hosts_path()
+    default_hosts = [
+        "*.nexon.com",
+        "*.nexon.co.kr",
+        "*.nx.com",
+        "*.nexon.io",
+        "*.nexon.net"
+    ]
+    if not os.path.exists(path):
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("# LibertyGSM - Exclude Hosts\n")
+                f.write("# Domains listed here will bypass TLS record-layer fragmentation.\n")
+                f.write("# Use this for sites that fail to connect or throw handshake/TLS reset errors.\n")
+                f.write("# Lines starting with # are ignored. Wildcards are supported (e.g., *.nexon.com).\n\n")
+                for host in default_hosts:
+                    f.write(f"{host}\n")
+        except Exception:
+            pass
+        return set(default_hosts)
+
+    hosts = set()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    hosts.add(line.lower())
+    except Exception:
+        return set(default_hosts)
+    return hosts
+
+
+def is_host_excluded(host: str, exclude_hosts: set[str]) -> bool:
+    if not host or host in ("<no-sni>", "<empty>"):
+        return False
+    host = host.lower().strip()
+    for pattern in exclude_hosts:
+        pattern = pattern.strip().lower()
+        if not pattern:
+            continue
+        if pattern.startswith("*."):
+            suffix = pattern[2:]
+            if host == suffix or host.endswith("." + suffix):
+                return True
+        else:
+            if host == pattern or host.endswith("." + pattern):
+                return True
+    return False
+
 
 
 def tls_record_len(buf):
