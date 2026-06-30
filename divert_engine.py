@@ -22,6 +22,7 @@ itself proven by mitmproxy's WinDivert transparent proxy. Requires Administrator
 from __future__ import annotations
 
 import http.client
+import queue
 import socket
 import socketserver
 import ssl
@@ -56,8 +57,13 @@ DOH_TIMEOUT = 5.0
 INTERCEPT_TCP_PORTS = [443, 8080, 8443, 8880, 2053, 2083, 2087, 2096] + list(range(27015, 27031))
 
 RELAY_PORT = 47443                # local HTTPS-splitting relay
-UPSTREAM_PORT_BASE = 30000        # relay -> server sockets bound here...
-UPSTREAM_PORT_COUNT = 2048        # ...so the kernel filter can exclude them
+# relay -> server sockets bind to a source port in this range so the kernel
+# filter can exclude them (and never re-capture our own upstream leg). A large
+# range avoids EADDRINUSE/TIME_WAIT exhaustion under load. It sits below Windows'
+# dynamic/ephemeral range (49152+), so the OS never hands these ports to other
+# apps -- excluding them is safe.
+UPSTREAM_PORT_BASE = 20000
+UPSTREAM_PORT_COUNT = 20000       # 20000-39999
 _UPSTREAM_HI = UPSTREAM_PORT_BASE + UPSTREAM_PORT_COUNT - 1
 
 HTTPS_CONNECT_TIMEOUT = 8.0
@@ -141,8 +147,10 @@ def sniff_outbound_ports(log, duration=30.0, standard_ports=(80, 443, 53),
 class DohClient:
     """Resolve raw DNS queries over DoH (RFC 8484 application/dns-message).
 
-    Keeps one kept-alive HTTPS connection per resolver and fails over to the
-    next resolver IP when one stops answering."""
+    Uses a POOL of kept-alive HTTPS connections so many DNS lookups can run
+    concurrently (a page with dozens of domains otherwise serializes all of its
+    DNS behind one connection -- the main source of "it works but it's slow").
+    Fails over to the next resolver IP when the active one stops answering."""
 
     _HEADERS = {
         "Content-Type": "application/dns-message",
@@ -150,43 +158,71 @@ class DohClient:
         "User-Agent": "LibertyGSM",
     }
 
-    def __init__(self, server_ips=None, path=DOH_PATH, timeout=DOH_TIMEOUT):
+    def __init__(self, server_ips=None, path=DOH_PATH, timeout=DOH_TIMEOUT, pool_size=12):
         self.server_ips = list(server_ips or DOH_IPS)
         self.path = path
         self.timeout = timeout
+        self.pool_size = pool_size
         self._ctx = ssl.create_default_context()
-        self._conn = None
-        self._active_ip = None
-        self._lock = threading.Lock()
+        self._pool = queue.Queue()        # idle HTTPSConnection objects (tagged ._doh_ip)
+        self._ip_lock = threading.Lock()
+        self._active_ip = self.server_ips[0]
 
     def _open(self, ip):
-        return http.client.HTTPSConnection(ip, 443, timeout=self.timeout, context=self._ctx)
+        conn = http.client.HTTPSConnection(ip, 443, timeout=self.timeout, context=self._ctx)
+        conn._doh_ip = ip
+        return conn
+
+    def _get_active_ip(self):
+        with self._ip_lock:
+            return self._active_ip
+
+    def _rotate_ip(self, failed_ip):
+        with self._ip_lock:
+            if self._active_ip != failed_ip:
+                return  # another thread already rotated away from it
+            idx = self.server_ips.index(failed_ip) if failed_ip in self.server_ips else -1
+            self._active_ip = self.server_ips[(idx + 1) % len(self.server_ips)]
+
+    def _borrow(self, ip):
+        """An idle pooled connection for `ip`, or a fresh one."""
+        while True:
+            try:
+                conn = self._pool.get_nowait()
+            except queue.Empty:
+                return self._open(ip)
+            if getattr(conn, "_doh_ip", None) == ip:
+                return conn
+            _safe_close(conn)  # stale (resolver rotated) -> drop it
+
+    def _release(self, conn):
+        if self._pool.qsize() < self.pool_size:
+            self._pool.put(conn)
+        else:
+            _safe_close(conn)
 
     def resolve(self, query: bytes) -> bytes:
-        with self._lock:
-            # Try the active resolver first, then the rest, reconnecting once each.
-            order = ([self._active_ip] if self._active_ip else []) + \
-                    [ip for ip in self.server_ips if ip != self._active_ip]
-            last_err = None
-            for ip in order:
-                for _ in range(2):  # one reconnect on a stale keep-alive
-                    try:
-                        if self._conn is None or self._active_ip != ip:
-                            self._close()
-                            self._conn = self._open(ip)
-                            self._active_ip = ip
-                        headers = dict(self._HEADERS, **{"Content-Length": str(len(query))})
-                        self._conn.request("POST", self.path, body=query, headers=headers)
-                        resp = self._conn.getresponse()
-                        data = resp.read()
-                        if resp.status != 200 or not data:
-                            raise IOError(f"DoH HTTP {resp.status}")
-                        return data
-                    except Exception as exc:
-                        last_err = exc
-                        self._close()
-                        self._active_ip = None
-            raise RuntimeError(f"all DoH resolvers failed: {last_err}")
+        headers = dict(self._HEADERS, **{"Content-Length": str(len(query))})
+        last_err = None
+        for _ in range(len(self.server_ips)):
+            ip = self._get_active_ip()
+            # Try a pooled (possibly stale keep-alive) conn, then a fresh one;
+            # only rotate the resolver IP if even a fresh connection fails.
+            for fresh in (False, True):
+                conn = self._open(ip) if fresh else self._borrow(ip)
+                try:
+                    conn.request("POST", self.path, body=query, headers=headers)
+                    resp = conn.getresponse()
+                    data = resp.read()
+                    if resp.status != 200 or not data:
+                        raise IOError(f"DoH HTTP {resp.status}")
+                    self._release(conn)
+                    return data
+                except Exception as exc:
+                    last_err = exc
+                    _safe_close(conn)
+            self._rotate_ip(ip)
+        raise RuntimeError(f"all DoH resolvers failed: {last_err}")
 
     def probe(self):
         # Minimal A query for example.com to confirm the upstream is reachable.
@@ -194,22 +230,16 @@ class DohClient:
              b"\x07example\x03com\x00\x00\x01\x00\x01")
         try:
             self.resolve(q)
-            return True, self._active_ip or "ok"
+            return True, self._get_active_ip()
         except Exception as exc:
             return False, str(exc)
 
-    def _close(self):
-        if self._conn is not None:
-            try:
-                self._conn.close()
-            except Exception:
-                pass
-            self._conn = None
-
     def close(self):
-        with self._lock:
-            self._close()
-            self._active_ip = None
+        while True:
+            try:
+                _safe_close(self._pool.get_nowait())
+            except queue.Empty:
+                break
 
 
 # --------------------------------------------------------------------------- #
