@@ -53,7 +53,7 @@ DOH_TIMEOUT = 5.0
 # NOT include server-speaks-first ports (SSH 22, SMTP 25, DB ports, ...) -- routing
 # those through the relay would stall them. Add a port here if a site needs it
 # (use the "게임 포트 찾기" diagnostic button to discover it).
-INTERCEPT_TCP_PORTS = [443, 8080, 8443, 8880, 2053, 2083, 2087, 2096]
+INTERCEPT_TCP_PORTS = [443, 8080, 8443, 8880, 2053, 2083, 2087, 2096] + list(range(27015, 27031))
 
 RELAY_PORT = 47443                # local HTTPS-splitting relay
 UPSTREAM_PORT_BASE = 30000        # relay -> server sockets bound here...
@@ -324,12 +324,20 @@ class _RelayHandler(socketserver.BaseRequestHandler):
         hello = _read_client_hello(client)
         if not hello:
             return
+        # CRITICAL: _read_client_hello left an 8s read timeout on the client
+        # socket. Clear it -- otherwise any long-lived connection where the
+        # client goes quiet for >8s (Discord gateway, KKuTu game, live streams,
+        # any WebSocket) would time out and get torn down every few seconds.
+        client.settimeout(None)
+
         stats = {"down": 0}
+        host = server_ip
         try:
             if hello[0] == _TLS_HANDSHAKE:
+                host = sni_name(hello)
                 records = fragment_client_hello(hello, engine.mode)
                 delay = engine.frag_delay()
-                engine.log(f"{sni_name(hello)} -> {len(records)} TLS records ({engine.mode})")
+                engine.log(f"흐흐 {host} ClientHello 가로채기 성공 → {len(records)}조각으로 분쇄 ({engine.mode})")
                 for i, rec in enumerate(records):
                     upstream.sendall(rec)
                     if delay and i < len(records) - 1:
@@ -348,8 +356,10 @@ class _RelayHandler(socketserver.BaseRequestHandler):
             engine.stats["https_total"] += 1
             if stats["down"] == 0:
                 engine.stats["https_reset"] += 1
-                engine.log(f"{server_ip}: 0 bytes back after ClientHello -- DPI reset "
-                           f"or IP block (browser retry may still succeed).", "WARNING")
+                engine.log(f"ㅠㅠ {host} 우회 실패 — 핸드셰이크 직후 끊김(DPI 리셋 또는 IP 차단). "
+                           f"브라우저가 재시도하면 될 수도 있음.", "WARNING")
+            else:
+                engine.log(f"흐흐 {host} 우회 성공 (응답 {stats['down'] // 1024}KB 받음)")
 
 
 class _RelayServer(socketserver.ThreadingTCPServer):

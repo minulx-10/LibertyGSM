@@ -8,6 +8,24 @@ import time
 
 from divert_engine import DivertEngine, sniff_outbound_ports
 
+# Optional system-tray support (run in the background like Cloudflare WARP).
+# Falls back gracefully to a normal window if pystray/Pillow aren't installed.
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+    _HAS_TRAY = True
+except Exception:
+    _HAS_TRAY = False
+
+
+def _make_tray_image():
+    img = Image.new("RGBA", (64, 64), (18, 18, 20, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([4, 4, 60, 60], radius=12, fill=(18, 18, 20, 255),
+                        outline=(168, 85, 247, 255), width=4)
+    d.text((23, 20), "L", fill=(168, 85, 247, 255))
+    return img
+
 
 class LibertyGSMApp:
     def __init__(self, root):
@@ -20,12 +38,31 @@ class LibertyGSMApp:
         self.engine = None
         self.is_running = False
         self.log_queue = queue.Queue()
-        self.result_queue = queue.Queue()   # ('start', bool) from the worker thread
+        self.result_queue = queue.Queue()   # ('start'|'sniff'|'show'|'quit', ...)
+        self.tray_icon = None
 
         self._setup_styles()
         self._build_ui()
+        self._setup_tray()
         self.root.after(100, self._tick)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def _setup_tray(self):
+        """Build a system-tray icon so closing the window keeps the bypass
+        running in the background (like Cloudflare WARP)."""
+        if not _HAS_TRAY:
+            return
+        # Tray callbacks run on pystray's thread; marshal to the Tk thread via
+        # the result queue (drained by _tick) to stay thread-safe.
+        menu = pystray.Menu(
+            pystray.MenuItem("창 열기", lambda *_: self.result_queue.put(("show",)), default=True),
+            pystray.MenuItem("종료", lambda *_: self.result_queue.put(("quit",))),
+        )
+        try:
+            self.tray_icon = pystray.Icon("LibertyGSM", _make_tray_image(), "LibertyGSM", menu)
+            threading.Thread(target=self.tray_icon.run, daemon=True).start()
+        except Exception:
+            self.tray_icon = None
 
     def _setup_styles(self):
         self.style = ttk.Style()
@@ -84,6 +121,12 @@ class LibertyGSMApp:
                  font=("Segoe UI", 9), fg="#6b7280", bg="#121214", wraplength=560, justify="left"
                  ).pack(anchor="w", pady=(8, 0))
 
+        if _HAS_TRAY:
+            tray_info = "💡 [트레이 안내] 창을 닫아도 백그라운드(시스템 트레이)에서 계속 실행됩니다.\n완전히 종료하려면 트레이 아이콘을 우클릭하여 '종료'를 선택하세요."
+            tk.Label(config, text=tray_info, font=("Segoe UI", 9), fg="#a855f7", bg="#121214",
+                     wraplength=560, justify="left").pack(anchor="w", pady=(6, 0))
+
+
         # Diagnostic: find which (non-443) port a stuck site/game connects to.
         self.sniff_btn = tk.Button(config, text="🔍 게임 포트 찾기 (30초 진단)",
                                    font=("Segoe UI", 9, "bold"), bg="#2e2e38", fg="#d1d5db",
@@ -126,11 +169,18 @@ class LibertyGSMApp:
         # Handle a finished start() from the worker thread.
         try:
             while True:
-                kind, ok = self.result_queue.get_nowait()
+                item = self.result_queue.get_nowait()
+                kind = item[0]
                 if kind == "start":
-                    self._finish_start(ok)
+                    self._finish_start(item[1])
                 elif kind == "sniff":
                     self.sniff_btn.config(state=tk.NORMAL, text="🔍 게임 포트 찾기 (30초 진단)")
+                elif kind == "show":
+                    self.root.deiconify()
+                    self.root.lift()
+                    self.root.focus_force()
+                elif kind == "quit":
+                    self._real_quit()
         except queue.Empty:
             pass
 
@@ -215,9 +265,24 @@ class LibertyGSMApp:
         self.stats_label.config(text="DNS: 0   HTTPS: 0   QUIC blk: 0   resets: 0")
 
     def on_closing(self):
+        # With a tray icon, the [X] button hides to the background instead of
+        # quitting -- the bypass keeps running. Quit from the tray menu.
+        if self.tray_icon is not None:
+            self.root.withdraw()
+            self.log_message(f"[{time.strftime('%H:%M:%S')}] [SYSTEM] "
+                             f"트레이에서 백그라운드 실행 중. (트레이 아이콘 우클릭 → 종료)")
+        else:
+            self._real_quit()
+
+    def _real_quit(self):
         if self.engine:
             try:
                 self.engine.stop()
+            except Exception:
+                pass
+        if self.tray_icon is not None:
+            try:
+                self.tray_icon.stop()
             except Exception:
                 pass
         self.root.destroy()
