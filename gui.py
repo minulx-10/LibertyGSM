@@ -41,6 +41,7 @@ class LibertyGSMApp:
         self.result_queue = queue.Queue()   # ('start'|'sniff'|'show'|'quit', ...)
         self.tray_icon = None
         self.first_success_notified = False
+        self.toast_timer_id = None
 
         self._setup_styles()
         self._build_ui()
@@ -100,6 +101,9 @@ class LibertyGSMApp:
         self.stats_label = tk.Label(info, text="DNS: 0   HTTPS: 0   resets: 0",
                                     font=("Segoe UI", 10), fg="#9ca3af", bg="#1e1e24")
         self.stats_label.pack(anchor="w", pady=(3, 0))
+
+        self.toast_label = tk.Label(info, text="", font=("Segoe UI", 9, "bold"), fg="#a855f7", bg="#1e1e24")
+        self.toast_label.pack(anchor="w", pady=(2, 0))
 
         self.toggle_btn = tk.Button(self.status_card, text="START", font=("Segoe UI", 12, "bold"),
                                     bg="#ef4444", fg="#ffffff", activebackground="#dc2626",
@@ -182,6 +186,8 @@ class LibertyGSMApp:
                     self.root.focus_force()
                 elif kind == "quit":
                     self._real_quit()
+                elif kind == "bypass_success":
+                    self.show_gui_toast(f"✨ 우회 성공: {item[1]}")
         except queue.Empty:
             pass
 
@@ -201,6 +207,16 @@ class LibertyGSMApp:
                         pass
 
         self.root.after(100, self._tick)
+
+    def show_gui_toast(self, message):
+        self.toast_label.config(text=message)
+        if self.toast_timer_id is not None:
+            self.root.after_cancel(self.toast_timer_id)
+        self.toast_timer_id = self.root.after(3000, self._clear_toast)
+
+    def _clear_toast(self):
+        self.toast_label.config(text="")
+        self.toast_timer_id = None
 
     def clear_logs(self):
         self.console.config(state=tk.NORMAL)
@@ -239,9 +255,13 @@ class LibertyGSMApp:
         self.toggle_btn.config(state=tk.DISABLED, text="...")
         self.mode_combo.config(state=tk.DISABLED)
         self.first_success_notified = False
-        self.engine = DivertEngine(mode=self.mode_combo.get(), log_callback=self.log_message)
+        self.engine = DivertEngine(mode=self.mode_combo.get(), log_callback=self.log_message,
+                                   event_callback=self.handle_engine_event)
         # start() does a (blocking) DoH probe + driver open -> run off the UI thread.
         threading.Thread(target=self._start_worker, daemon=True).start()
+
+    def handle_engine_event(self, event_type, data):
+        self.result_queue.put((event_type, data))
 
     def _start_worker(self):
         ok = False

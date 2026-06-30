@@ -358,6 +358,9 @@ class _RelayHandler(socketserver.BaseRequestHandler):
                 engine.stats["https_reset"] += 1
                 engine.log(f"{host}: 0 bytes back after ClientHello -- DPI reset "
                            f"or IP block (browser retry may still succeed).", "WARNING")
+            else:
+                if engine.event_callback:
+                    engine.event_callback("bypass_success", host)
 
 
 class _RelayServer(socketserver.ThreadingTCPServer):
@@ -369,9 +372,10 @@ class _RelayServer(socketserver.ThreadingTCPServer):
 # Engine: WinDivert capture loop + dispatch
 # --------------------------------------------------------------------------- #
 class DivertEngine:
-    def __init__(self, mode="Standard", log_callback=None):
+    def __init__(self, mode="Standard", log_callback=None, event_callback=None):
         self.mode = mode
         self.log_callback = log_callback
+        self.event_callback = event_callback
         self.conn_map = {}                  # (src_addr,src_port)->(dst_addr,dst_port)
         self.doh = DohClient()
         self.stats = {"dns": 0, "https_total": 0, "https_reset": 0, "quic": 0}
