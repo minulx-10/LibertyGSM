@@ -34,7 +34,9 @@ android {
 
 dependencies {
     // libgsm.aar is produced by ../build-aar.sh (gomobile bind of core-go/tunnel).
-    implementation(files("libs/libgsm.aar"))
+    // fileTree so Gradle still syncs before it's generated (compile then fails
+    // on the tunnel.* imports with a clear message until you run build-aar).
+    implementation(fileTree("libs") { include("*.aar") })
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
