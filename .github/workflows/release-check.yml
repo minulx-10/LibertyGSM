@@ -25,3 +25,18 @@ jobs:
           python -m pip install -r requirements.txt
       - name: Run release smoke checks
         run: python scripts/release_check.py
+
+  go-core:
+    name: Go core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: Test the shared Go core
+        working-directory: core-go
+        run: |
+          test -z "$(gofmt -l .)" || (echo "gofmt needed:" && gofmt -l . && exit 1)
+          go vet ./...
+          go test ./...

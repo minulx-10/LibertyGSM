@@ -47,11 +47,20 @@ Reference APIs:
 
 ## Shared logic that should be reused
 
-- TLS ClientHello parsing and record-layer fragmentation: `tls_frag.py`
-- Exclude-host matching and default whitelist handling: `tls_frag.py`
+The long-term plan is a **single portable core in Go** (`core-go/`) that backs
+every platform — desktop binaries directly, and Android/iOS via `gomobile bind`
+— so the bypass algorithm is maintained once instead of once per language (the
+approach Jigsaw's Intra uses). The Python modules remain the Windows runtime
+until a Go-based engine replaces them; both are kept equivalent via the same
+test fixtures.
+
+- Portable cross-platform core (canonical, going forward): `core-go/tlsfrag`
+  (fragmentation, SNI parsing, exclude-host matching; DoH next).
+- TLS ClientHello parsing and record-layer fragmentation (Python runtime): `tls_frag.py`
+- Exclude-host matching and default whitelist handling (Python runtime): `tls_frag.py`
 - Platform engine contract and target state: `engines/`
 - Desktop local proxy preview: `engines/portable_proxy.py` and `bypass_proxy.py`
-- Release smoke checks: `scripts/release_check.py`
+- Release smoke checks: `scripts/release_check.py` (Python) + `core-go` Go tests in CI
 
 ## Criteria before marking another OS supported
 
