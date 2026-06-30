@@ -337,7 +337,7 @@ class _RelayHandler(socketserver.BaseRequestHandler):
                 host = sni_name(hello)
                 records = fragment_client_hello(hello, engine.mode)
                 delay = engine.frag_delay()
-                engine.log(f"흐흐 {host} ClientHello 가로채기 성공 → {len(records)}조각으로 분쇄 ({engine.mode})")
+                engine.log(f"{host} -> {len(records)} TLS records ({engine.mode})")
                 for i, rec in enumerate(records):
                     upstream.sendall(rec)
                     if delay and i < len(records) - 1:
@@ -356,10 +356,8 @@ class _RelayHandler(socketserver.BaseRequestHandler):
             engine.stats["https_total"] += 1
             if stats["down"] == 0:
                 engine.stats["https_reset"] += 1
-                engine.log(f"ㅠㅠ {host} 우회 실패 — 핸드셰이크 직후 끊김(DPI 리셋 또는 IP 차단). "
-                           f"브라우저가 재시도하면 될 수도 있음.", "WARNING")
-            else:
-                engine.log(f"흐흐 {host} 우회 성공 (응답 {stats['down'] // 1024}KB 받음)")
+                engine.log(f"{host}: 0 bytes back after ClientHello -- DPI reset "
+                           f"or IP block (browser retry may still succeed).", "WARNING")
 
 
 class _RelayServer(socketserver.ThreadingTCPServer):

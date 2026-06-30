@@ -40,6 +40,7 @@ class LibertyGSMApp:
         self.log_queue = queue.Queue()
         self.result_queue = queue.Queue()   # ('start'|'sniff'|'show'|'quit', ...)
         self.tray_icon = None
+        self.first_success_notified = False
 
         self._setup_styles()
         self._build_ui()
@@ -191,6 +192,14 @@ class LibertyGSMApp:
                 text=f"DNS: {s['dns']}   HTTPS: {s['https_total']}   "
                      f"QUIC blk: {s['quic']}   resets: {s['https_reset']}")
 
+            if s['https_total'] > 0 and not self.first_success_notified:
+                self.first_success_notified = True
+                if self.tray_icon is not None:
+                    try:
+                        self.tray_icon.notify("첫 우회 성공! LibertyGSM이 백그라운드에서 작동 중입니다.", "LibertyGSM")
+                    except Exception:
+                        pass
+
         self.root.after(100, self._tick)
 
     def clear_logs(self):
@@ -229,6 +238,7 @@ class LibertyGSMApp:
     def start_bypass(self):
         self.toggle_btn.config(state=tk.DISABLED, text="...")
         self.mode_combo.config(state=tk.DISABLED)
+        self.first_success_notified = False
         self.engine = DivertEngine(mode=self.mode_combo.get(), log_callback=self.log_message)
         # start() does a (blocking) DoH probe + driver open -> run off the UI thread.
         threading.Thread(target=self._start_worker, daemon=True).start()
@@ -280,6 +290,18 @@ class LibertyGSMApp:
                 self.engine.stop()
             except Exception:
                 pass
+
+        # Unload the WinDivert DLL to release the file lock for PyInstaller cleanup
+        try:
+            import ctypes
+            import pydivert.windivert_dll as w
+            handle = ctypes.windll.kernel32.GetModuleHandleW(w.DLL_PATH)
+            if handle:
+                while ctypes.windll.kernel32.FreeLibrary(handle):
+                    pass
+        except Exception:
+            pass
+
         if self.tray_icon is not None:
             try:
                 self.tray_icon.stop()
