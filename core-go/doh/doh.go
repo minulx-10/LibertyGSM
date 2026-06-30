@@ -10,8 +10,10 @@ package doh
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -48,6 +50,17 @@ func WithHTTPClient(h *http.Client) Option { return func(c *Client) { c.http = h
 // WithTimeout sets the per-request timeout.
 func WithTimeout(d time.Duration) Option {
 	return func(c *Client) { c.http.Timeout = d }
+}
+
+// WithDialContext routes the resolver's own TCP connections through a custom
+// dialer. On a VPN/tunnel this MUST be a VPN-protected dialer, otherwise the
+// DoH connection to the resolver loops straight back into the tunnel.
+func WithDialContext(dc func(ctx context.Context, network, addr string) (net.Conn, error)) Option {
+	return func(c *Client) {
+		if tr, ok := c.http.Transport.(*http.Transport); ok {
+			tr.DialContext = dc
+		}
+	}
 }
 
 // New builds a Client over the given endpoints (DefaultEndpoints if empty).

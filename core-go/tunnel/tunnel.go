@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"os"
 	"strconv"
@@ -94,13 +95,17 @@ func Connect(fd int, mode, excludeHostsNewlineSep string, prot Protector) (*Sess
 		}),
 		ep:     channel.New(512, mtu, ""),
 		tun:    os.NewFile(uintptr(fd), "tun"),
-		doh:    doh.New(nil),
 		prot:   prot,
 		ctx:    ctx,
 		cancel: cancel,
 		mode:   mode,
 		hosts:  splitHosts(excludeHostsNewlineSep),
 	}
+	// The DoH resolver MUST dial through a VPN-protected socket; otherwise its
+	// connection to the resolver (e.g. 1.0.0.1) loops back into this tunnel.
+	s.doh = doh.New(nil, doh.WithDialContext(func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return s.protectedDialer().DialContext(ctx, network, addr)
+	}))
 
 	if err := s.stack.CreateNIC(nicID, s.ep); err != nil {
 		cancel()
@@ -158,6 +163,7 @@ func (s *Session) snapshot() (string, []string) {
 // --- TUN <-> netstack pumps --------------------------------------------------
 
 func (s *Session) inboundLoop() {
+	defer guard("inboundLoop")
 	buf := make([]byte, 65535)
 	for {
 		n, err := s.tun.Read(buf)
@@ -178,6 +184,7 @@ func (s *Session) inboundLoop() {
 }
 
 func (s *Session) outboundLoop() {
+	defer guard("outboundLoop")
 	for {
 		pkt := s.ep.ReadContext(s.ctx)
 		if pkt == nil {
@@ -192,19 +199,34 @@ func (s *Session) outboundLoop() {
 
 // --- dialing (VPN-protected) -------------------------------------------------
 
-func (s *Session) dial(network, dst string) (net.Conn, error) {
-	d := net.Dialer{
+// protectedDialer builds a dialer whose sockets are excluded from the VPN (via
+// the native Protector) so the tunnel's own upstream connections reach the real
+// network instead of looping back into the tunnel.
+func (s *Session) protectedDialer() *net.Dialer {
+	return &net.Dialer{
 		Timeout: firstRTO,
 		Control: func(_, _ string, c syscall.RawConn) error {
 			return c.Control(func(fd uintptr) { s.prot.Protect(int(fd)) })
 		},
 	}
-	return d.DialContext(s.ctx, network, dst)
+}
+
+func (s *Session) dial(network, dst string) (net.Conn, error) {
+	return s.protectedDialer().DialContext(s.ctx, network, dst)
+}
+
+// guard keeps one bad connection/packet from crashing the whole VPN process
+// (an unrecovered panic in any goroutine aborts the app).
+func guard(tag string) {
+	if r := recover(); r != nil {
+		log.Printf("libertygsm tunnel: recovered in %s: %v", tag, r)
+	}
 }
 
 // --- TCP: fragment the ClientHello, then pipe --------------------------------
 
 func (s *Session) handleTCP(r *tcp.ForwarderRequest) {
+	defer guard("handleTCP")
 	id := r.ID()
 	var wq waiter.Queue
 	ep, terr := r.CreateEndpoint(&wq)
@@ -220,6 +242,7 @@ func (s *Session) handleTCP(r *tcp.ForwarderRequest) {
 }
 
 func (s *Session) pipeTCP(local net.Conn, dst string) {
+	defer guard("pipeTCP")
 	defer local.Close()
 	up, err := s.dial("tcp", dst)
 	if err != nil {
@@ -254,6 +277,7 @@ func (s *Session) pipeTCP(local net.Conn, dst string) {
 // --- UDP: DoH for :53, drop :443 (QUIC), forward the rest --------------------
 
 func (s *Session) handleUDP(r *udp.ForwarderRequest) bool {
+	defer guard("handleUDP")
 	id := r.ID()
 	if id.LocalPort == 443 {
 		s.quicCount.Add(1)
@@ -274,6 +298,7 @@ func (s *Session) handleUDP(r *udp.ForwarderRequest) bool {
 }
 
 func (s *Session) handleDNS(conn net.Conn) {
+	defer guard("handleDNS")
 	defer conn.Close()
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	q := make([]byte, 1500)
@@ -290,6 +315,7 @@ func (s *Session) handleDNS(conn net.Conn) {
 }
 
 func (s *Session) pipeUDP(conn net.Conn, dst string) {
+	defer guard("pipeUDP")
 	defer conn.Close()
 	up, err := s.dial("udp", dst)
 	if err != nil {
@@ -302,11 +328,15 @@ func (s *Session) pipeUDP(conn net.Conn, dst string) {
 
 // --- helpers -----------------------------------------------------------------
 
+// addrString renders a gVisor address as a dotted/colon IP. Use As4 directly for
+// IPv4 (As16 front-pads a 4-byte address, which is NOT v4-in-v6, so slicing it
+// yields the wrong bytes).
 func addrString(a tcpip.Address) string {
-	b := a.As16()
 	if a.Len() == 4 {
-		return net.IP(b[12:]).String()
+		b := a.As4()
+		return net.IP(b[:]).String()
 	}
+	b := a.As16()
 	return net.IP(b[:]).String()
 }
 
