@@ -1,6 +1,6 @@
 # LibertyGSM — 네트워크 검열(SNI/DPI) 우회 학습 프로젝트 (시스템 전체)
 
-**LibertyGSM**은 제한된 네트워크 환경에서 일어나는 DNS·SNI·DPI 검열의 동작 원리를 직접 구현하며 학습하기 위한 유틸리티입니다. **WinDivert**(윈도우 패킷 드라이버)로 트래픽을 드라이버 레벨에서 가로채기 때문에, 프록시 설정이나 브라우저 선택 없이 **시스템의 모든 앱이 자동으로 처리**됩니다.
+**LibertyGSM**은 제한된 네트워크 환경에서 일어나는 DNS·SNI·DPI 검열의 동작 원리를 직접 구현하며 학습하기 위한 유틸리티입니다. 현재 안정 동작하는 엔진은 **Windows WinDivert**이며, 트래픽을 드라이버 레벨에서 가로채기 때문에 프록시 설정이나 브라우저 선택 없이 **시스템의 모든 앱이 자동으로 처리**됩니다.
 
 외부 VPN 서버를 경유하지 않아 **개인정보 유출 우려가 없고, 원래의 네트워크 속도를 최대한 유지**하면서 검열만 우회합니다.
 
@@ -21,6 +21,8 @@
 
 ## 🚀 실행 방법
 
+현재 전체 시스템 자동 우회 엔진은 Windows에서 제공됩니다. macOS/Linux 데스크톱에서는 로컬 프록시 프리뷰 엔진을 사용할 수 있지만, 앱 또는 OS의 HTTP/HTTPS 프록시를 `127.0.0.1:10809`로 설정해야 합니다. Android, iPadOS, iOS는 공통 TLS/DoH 코어를 공유하되 각 OS의 네이티브 VPN/터널 엔진을 새로 구현해야 합니다.
+
 > ⚠️ WinDivert가 커널 드라이버를 올리므로 **관리자 권한이 필요**합니다. 실행 시 UAC(관리자 권한 요청) 창이 자동으로 뜹니다.
 
 ### 1. Python으로 직접 실행
@@ -35,6 +37,18 @@ python gui.py
 build.bat 더블클릭
 ```
 `dist\LibertyGSM.exe`가 생성됩니다. WinDivert 드라이버가 exe 안에 포함되고, 더블클릭하면 관리자 권한을 자동 요청합니다.
+
+---
+
+## ✅ 릴리즈 점검
+
+릴리즈 전 아래 명령으로 공통 코드, 플랫폼 엔진 메타데이터, 문서 상태를 점검합니다.
+
+```bash
+python scripts/release_check.py
+```
+
+GitHub Actions의 `release-check` 워크플로도 Windows, macOS, Ubuntu에서 같은 스모크 체크를 실행합니다. 단, 자동 투명 우회가 지원되는 릴리즈 대상은 Windows이며 macOS/Linux는 수동 프록시 설정이 필요한 프리뷰 모드입니다.
 
 ---
 
@@ -55,6 +69,19 @@ build.bat 더블클릭
 - **예외 호스트 설정 파일 (`exclude_hosts.txt`)**: 프로그램이 실행되는 폴더에 생성됩니다. 줄바꿈으로 제외할 도메인을 적어두면 파편화를 적용하지 않고 정상적으로 원본 패킷을 전달해 줍니다.
 - **와일드카드 지원**: `*.nexon.com` 형태로 작성하여 서브도메인을 포함해 한 번에 예외 처리를 할 수 있습니다.
 - **원클릭 설정**: GUI 화면 내 `🛠️ 제외 도메인 설정` 버튼을 클릭하면 즉시 편집 파일이 실행됩니다.
+
+---
+
+## 🧭 크로스플랫폼 로드맵
+
+코드는 `engines/` 패키지를 통해 플랫폼별 패킷 엔진을 선택하도록 분리되어 있습니다. `tls_frag.py`의 TLS ClientHello 조각화와 DoH/예외 도메인 처리 로직은 플랫폼 공통 코어로 유지하고, 각 OS는 아래 방식의 엔진을 추가하는 방향입니다.
+
+- **Windows**: WinDivert 투명 엔진 지원 완료.
+- **macOS/Linux 데스크톱**: 로컬 프록시 프리뷰 지원. 전체 시스템 투명 모드는 Network Extension/TUN 계열 엔진 필요.
+- **Android**: VpnService/TUN 기반 엔진 필요.
+- **iOS/iPadOS**: NEPacketTunnelProvider 앱 확장과 Apple entitlement 기반 엔진 필요.
+
+상세 기준은 `docs/PLATFORM_SUPPORT.md`와 `docs/RELEASE_CHECKLIST.md`에 정리되어 있습니다.
 
 ---
 

@@ -9,6 +9,7 @@ venv/
 build/
 dist/
 *.spec
+!LibertyGSM.spec
 
 # Editor / OS
 .vscode/

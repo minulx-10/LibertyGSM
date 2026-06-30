@@ -1,7 +1,7 @@
 # LibertyGSM (WinDivert engine) dependencies.
 
-# Required: pydivert bundles the WinDivert64.dll + signed .sys driver.
-pydivert>=3.1.3
+# Required on Windows: pydivert bundles the WinDivert64.dll + signed .sys driver.
+pydivert>=3.1.3; platform_system == "Windows"
 
 # Optional: system-tray support so closing the window keeps the bypass running
 # in the background (like Cloudflare WARP). The app falls back to a normal

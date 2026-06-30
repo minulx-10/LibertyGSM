@@ -171,17 +171,27 @@ _doh_opener_unverified = urllib.request.build_opener(
 )
 
 class BypassProxyServer:
-    def __init__(self, host="127.0.0.1", port=10809, bypass_mode="Standard", use_doh=True, log_callback=None):
+    def __init__(
+        self,
+        host="127.0.0.1",
+        port=10809,
+        bypass_mode="Standard",
+        use_doh=True,
+        log_callback=None,
+        event_callback=None,
+    ):
         self.host = host
         self.port = port
         self.bypass_mode = bypass_mode
         self.use_doh = use_doh
         self.log_callback = log_callback
+        self.event_callback = event_callback
         self.server_socket = None
         self.running = False
         self.dns_cache = {}
         self.exclude_hosts = load_exclude_hosts()
         self.active_connections = 0
+        self.stats = {"dns": 0, "https_total": 0, "https_reset": 0, "quic": 0}
         self._lock = threading.Lock()
 
     def log(self, message, level="INFO"):
@@ -283,6 +293,7 @@ class BypassProxyServer:
                             ip = answer["data"]
                             with self._lock:
                                 self.dns_cache[host] = ip
+                                self.stats["dns"] += 1
                             self.log(f"Resolved {host} -> {ip} via DoH ({url.split('?')[0]}, verify={verify})")
                             return ip
 
@@ -291,6 +302,7 @@ class BypassProxyServer:
             ip = socket.gethostbyname(host)
             with self._lock:
                 self.dns_cache[host] = ip
+                self.stats["dns"] += 1
             self.log(f"Resolved {host} -> {ip} via Local DNS (Fallback)")
             return ip
         except Exception as e:
@@ -436,13 +448,22 @@ class BypassProxyServer:
         # of an SNI/DPI reset or an IP-level block, NOT a code bug.
         if stats["down"] == 0:
             reason = "RST from network" if stats["reset"] else "connection dropped, no reply"
+            with self._lock:
+                self.stats["https_total"] += 1
+                self.stats["https_reset"] += 1
             self.log(
                 f"{host}: server returned 0 bytes after ClientHello ({reason}). "
                 f"DPI likely blocked this SNI -- record fragmentation was not enough here.",
                 "WARNING",
             )
+            if self.event_callback:
+                self.event_callback("bypass_fail", host)
         else:
+            with self._lock:
+                self.stats["https_total"] += 1
             self.log(f"{host}: OK (relayed up={stats['up']}B down={stats['down']}B)")
+            if self.event_callback:
+                self.event_callback("bypass_success", host)
 
     def _handle_http_request(self, client_sock, host, port, original_data):
         try:

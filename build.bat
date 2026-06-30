@@ -20,9 +20,9 @@ python -m pip install pyinstaller
 
 echo.
 echo [2/3] Building executable using PyInstaller...
-:: --uac-admin     : the .exe requests Administrator on launch (WinDivert needs it)
-:: --collect-all   : bundle pydivert's WinDivert64.dll + .sys driver into the exe
-python -m PyInstaller --onefile --noconsole --name=LibertyGSM --uac-admin --collect-all pydivert --collect-all pystray gui.py
+:: LibertyGSM.spec bundles WinDivert, requests Administrator, and excludes
+:: test-only/optional packages from the release binary.
+python -m PyInstaller --clean LibertyGSM.spec
 
 if %errorlevel% neq 0 (
     echo.

@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 
-from divert_engine import DivertEngine, sniff_outbound_ports
+from engines import UnsupportedPlatformError, create_engine, get_engine_info, sniff_outbound_ports
 
 # Optional system-tray support (run in the background like Cloudflare WARP).
 # Falls back gracefully to a normal window if pystray/Pillow aren't installed.
@@ -43,9 +43,11 @@ class LibertyGSMApp:
         self.tray_icon = None
         self.first_success_notified = False
         self.toast_timer_id = None
+        self.engine_info = get_engine_info()
 
         self._setup_styles()
         self._build_ui()
+        self._apply_engine_availability()
         self._setup_tray()
         self.root.after(100, self._tick)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -86,7 +88,10 @@ class LibertyGSMApp:
         header.pack(fill=tk.X, pady=(0, 15))
         tk.Label(header, text="LibertyGSM", font=("Segoe UI", 28, "bold"),
                  fg="#a855f7", bg="#121214").pack(anchor="w")
-        tk.Label(header, text="System-wide DPI / SNI Bypass  ·  WinDivert + DNS-over-HTTPS",
+        subtitle = "System-wide DPI / SNI Bypass  ·  DNS-over-HTTPS"
+        if self.engine_info.supported:
+            subtitle = f"{subtitle}  ·  {self.engine_info.name}"
+        tk.Label(header, text=subtitle,
                  font=("Segoe UI", 10), fg="#9ca3af", bg="#121214").pack(anchor="w")
 
         # --- Status & control panel ---
@@ -100,7 +105,8 @@ class LibertyGSMApp:
                                      fg="#ef4444", bg="#1e1e24")
         self.status_title.pack(anchor="w")
         self.stats_label = tk.Label(info, text="DNS: 0   HTTPS: 0   resets: 0",
-                                    font=("Segoe UI", 10), fg="#9ca3af", bg="#1e1e24")
+                                    font=("Segoe UI", 10), fg="#9ca3af", bg="#1e1e24",
+                                    wraplength=380, justify="left")
         self.stats_label.pack(anchor="w", pady=(3, 0))
 
         self.toast_label = tk.Label(info, text="", font=("Segoe UI", 9, "bold"), fg="#a855f7", bg="#1e1e24")
@@ -122,8 +128,14 @@ class LibertyGSMApp:
         self.mode_combo.set("Standard")
         self.mode_combo.pack(fill=tk.X, ipady=4)
         self.mode_combo.bind("<<ComboboxSelected>>", self._on_mode_change)
-        tk.Label(config, text="DNS-over-HTTPS and SNI fragmentation are always on. "
-                              "No proxy or browser setup needed — every app is covered.",
+        detail_text = "DNS-over-HTTPS and SNI fragmentation are always on."
+        if self.engine_info.transparent:
+            detail_text += " No proxy or browser setup needed — every app is covered."
+        elif self.engine_info.supported:
+            detail_text += f" {self.engine_info.reason}"
+        else:
+            detail_text += " A platform packet engine is required before this OS can run the bypass."
+        tk.Label(config, text=detail_text,
                  font=("Segoe UI", 9), fg="#6b7280", bg="#121214", wraplength=560, justify="left"
                  ).pack(anchor="w", pady=(8, 0))
 
@@ -164,6 +176,29 @@ class LibertyGSMApp:
                                                  highlightthickness=1)
         self.console.pack(fill=tk.BOTH, expand=True)
         self.console.config(state=tk.DISABLED)
+
+    def _apply_engine_availability(self):
+        if self.engine_info.supported:
+            self.log_message(
+                f"[{time.strftime('%H:%M:%S')}] [SYSTEM] Engine loaded: {self.engine_info.name}."
+            )
+            if not self.engine_info.supports_port_diagnostics:
+                self.sniff_btn.config(state=tk.DISABLED)
+            return
+
+        self.status_title.config(text="ENGINE UNAVAILABLE", fg="#f59e0b")
+        self.status_card.config(highlightbackground="#f59e0b", highlightcolor="#f59e0b")
+        self.stats_label.config(text=self.engine_info.reason)
+        self.toggle_btn.config(
+            text="UNSUPPORTED",
+            bg="#6b7280",
+            activebackground="#6b7280",
+            state=tk.DISABLED,
+        )
+        self.sniff_btn.config(state=tk.DISABLED)
+        self.log_message(
+            f"[{time.strftime('%H:%M:%S')}] [SYSTEM] {self.engine_info.reason}"
+        )
 
     # -- logging / periodic UI update ------------------------------------- #
     def log_message(self, message):
@@ -240,9 +275,12 @@ class LibertyGSMApp:
         path = get_exclude_hosts_path()
         load_exclude_hosts()  # ensures the file exists
         try:
-            os.startfile(path)
-        except AttributeError:
-            subprocess.Popen(["notepad.exe", path])
+            if sys.platform == "win32":
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
         except Exception as exc:
             self.log_message(f"[{time.strftime('%H:%M:%S')}] [ERROR] exclude_hosts.txt 열기 실패: {exc}")
 
@@ -320,6 +358,11 @@ class LibertyGSMApp:
         self.log_message(f"[{time.strftime('%H:%M:%S')}] [SYSTEM] Bypass intensity set to {mode}.")
 
     def find_game_port(self):
+        if not self.engine_info.supports_port_diagnostics:
+            self.log_message(
+                f"[{time.strftime('%H:%M:%S')}] [ERROR] 포트 진단은 Windows WinDivert 엔진에서만 지원됩니다."
+            )
+            return
         self.sniff_btn.config(state=tk.DISABLED, text="진단 중... 막힌 게임을 새로고침하세요 (30초)")
 
         def cb(msg, level="INFO"):
@@ -341,11 +384,25 @@ class LibertyGSMApp:
             self.start_bypass()
 
     def start_bypass(self):
+        if not self.engine_info.supported:
+            self.log_message(
+                f"[{time.strftime('%H:%M:%S')}] [ERROR] 시작 불가: {self.engine_info.reason}"
+            )
+            return
         self.toggle_btn.config(state=tk.DISABLED, text="...")
         self.mode_combo.config(state=tk.DISABLED)
         self.first_success_notified = False
-        self.engine = DivertEngine(mode=self.mode_combo.get(), log_callback=self.log_message,
-                                   event_callback=self.handle_engine_event)
+        try:
+            self.engine = create_engine(
+                mode=self.mode_combo.get(),
+                log_callback=self.log_message,
+                event_callback=self.handle_engine_event,
+            )
+        except UnsupportedPlatformError as exc:
+            self.engine = None
+            self.log_message(f"[{time.strftime('%H:%M:%S')}] [ERROR] Start failed: {exc}")
+            self._finish_start(False)
+            return
         # start() does a (blocking) DoH probe + driver open -> run off the UI thread.
         threading.Thread(target=self._start_worker, daemon=True).start()
 
@@ -355,7 +412,8 @@ class LibertyGSMApp:
     def _start_worker(self):
         ok = False
         try:
-            ok = self.engine.start()
+            if self.engine is not None:
+                ok = self.engine.start()
         except Exception as exc:
             self.log_message(f"[{time.strftime('%H:%M:%S')}] [ERROR] Start failed: {exc}")
         self.result_queue.put(("start", ok))
@@ -363,7 +421,8 @@ class LibertyGSMApp:
     def _finish_start(self, ok):
         if ok:
             self.is_running = True
-            self.status_title.config(text="BYPASS ACTIVE", fg="#10b981")
+            title = "BYPASS ACTIVE" if self.engine_info.transparent else "LOCAL PROXY ACTIVE"
+            self.status_title.config(text=title, fg="#10b981")
             self.status_card.config(highlightbackground="#10b981", highlightcolor="#10b981")
             self.toggle_btn.config(text="STOP", bg="#10b981", activebackground="#059669", state=tk.NORMAL)
             self.mode_combo.config(state="readonly")  # keep it changeable while running
@@ -400,16 +459,17 @@ class LibertyGSMApp:
             except Exception:
                 pass
 
-        # Unload the WinDivert DLL to release the file lock for PyInstaller cleanup
-        try:
-            import ctypes
-            import pydivert.windivert_dll as w
-            handle = ctypes.windll.kernel32.GetModuleHandleW(w.DLL_PATH)
-            if handle:
-                while ctypes.windll.kernel32.FreeLibrary(handle):
-                    pass
-        except Exception:
-            pass
+        if sys.platform == "win32":
+            # Unload the WinDivert DLL to release the file lock for PyInstaller cleanup.
+            try:
+                import ctypes
+                import pydivert.windivert_dll as w
+                handle = ctypes.windll.kernel32.GetModuleHandleW(w.DLL_PATH)
+                if handle:
+                    while ctypes.windll.kernel32.FreeLibrary(handle):
+                        pass
+            except Exception:
+                pass
 
         if self.tray_icon is not None:
             try:
@@ -443,7 +503,8 @@ def _relaunch_as_admin():
 
 
 if __name__ == "__main__":
-    if not _is_admin():
+    engine_info = get_engine_info()
+    if engine_info.requires_admin and not _is_admin():
         # Trigger a UAC prompt and relaunch elevated; the un-elevated process exits.
         try:
             _relaunch_as_admin()
