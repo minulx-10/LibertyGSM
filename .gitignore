@@ -27,3 +27,4 @@ captures/
 android/local.properties
 android/app/libs/*.aar
 
+android/app/libs/*.jar
