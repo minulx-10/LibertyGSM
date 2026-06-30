@@ -18,3 +18,12 @@ dist/
 Thumbs.db
 desktop.ini
 exclude_hosts.txt
+
+# Android / Gradle
+.gradle/
+.cxx/
+captures/
+*.iml
+android/local.properties
+android/app/libs/*.aar
+

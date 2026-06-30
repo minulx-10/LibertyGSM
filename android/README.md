@@ -1,78 +1,55 @@
-# LibertyGSM for Android (plan)
+# LibertyGSM for Android
 
-Android's transparent bypass is a `VpnService` app that reuses the Go core
-(`core-go/`) via gomobile — **no algorithm is re-implemented in Kotlin.** This is
-the same architecture Jigsaw's Intra uses.
-
-## Architecture
+A `VpnService` app whose entire packet engine is the shared Go core
+(`core-go/tunnel`, built on gVisor netstack) exposed via gomobile — **no bypass
+logic is re-implemented in Kotlin.** Same architecture as Jigsaw's Intra.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ Android app (Kotlin) — thin shell                            │
-│  • VpnService.Builder: create TUN, addRoute("0.0.0.0", 0)    │
-│  • hand the TUN file descriptor to Go                        │
-│  • VpnService.protect(socket) so upstream sockets bypass VPN │
-└───────────────┬─────────────────────────────────────────────┘
-                │ gomobile (.aar)
-┌───────────────▼─────────────────────────────────────────────┐
-│ Go core (core-go/) — all the real logic, one codebase        │
-│  • a userspace TCP/IP stack (gVisor netstack) reads the TUN  │
-│  • TCP :443/8080/... → dial protected upstream, then         │
-│      mobile.FragmentToWire(firstClientHello, mode) →         │
-│      write each record separately, then pipe                 │
-│  • UDP :53 → mobile.Resolver.Resolve(query) → write answer   │
-│  • UDP :443 (QUIC) → drop, forcing TCP fallback              │
-└─────────────────────────────────────────────────────────────┘
+Kotlin shell (this module)                     Go core (gomobile .aar)
+  MainActivity  ─ START/STOP, VPN consent        tunnel.Connect(fd, mode, …)
+  LibertyVpnService                                gVisor netstack on the TUN fd
+    • Builder.establish() → TUN fd                  • TCP → protected dial +
+    • Tunnel.connect(fd, mode, "", protector)         ClientHello fragmentation
+    • Protector.protect(fd)  ◄── Go calls back       • UDP/53 → DoH
+                                                     • UDP/443 (QUIC) → drop
 ```
 
-`core-go/mobile` already exposes everything the shell needs in
-gomobile-safe signatures: `FragmentToWire`, `SNIName`, `IsHostExcluded`,
-`DefaultExcludeHosts`, and a `Resolver` (`NewResolver`, `Resolve`, `Probe`).
+## Build
 
-## Build the bindings
+1. **Generate the .aar** from the Go core (needs Go 1.26.3+, the Android NDK, and
+   gomobile — see the script header):
+   ```bash
+   cd android
+   ./build-aar.sh        # Windows: build-aar.bat
+   ```
+   This runs `gomobile bind` on `core-go/tunnel` and writes
+   `app/libs/libgsm.aar` (gitignored).
 
-```bash
-go install golang.org/x/mobile/cmd/gomobile@latest
-gomobile init
-gomobile bind -target=android -androidapi 21 -o android/libgsm.aar ./core-go/mobile
-```
+2. **Open the `android/` folder in Android Studio** and Run. The app asks for VPN
+   permission, then START routes every app through the bypass.
 
-Drop `libgsm.aar` into the app module and call it from Kotlin.
+> The `.aar` is generated, not committed, so the Kotlin builds only after step 1.
 
-## Kotlin shell (skeleton)
+## Files
 
-```kotlin
-class LibertyVpnService : VpnService() {
-    override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
-        val tun = Builder()
-            .setSession("LibertyGSM")
-            .addAddress("10.111.0.1", 32)
-            .addRoute("0.0.0.0", 0)          // capture all IPv4
-            .addDnsServer("10.111.0.2")      // sink DNS into the tunnel
-            .establish() ?: return START_NOT_STICKY
-
-        // Hand the fd to the Go tunnel. `protect` lets Go's upstream sockets
-        // skip the VPN (no loop). Tunnel is a gomobile-bound Go type.
-        Tunnel.start(tun.fd, mode = "Standard", protector = { fd -> protect(fd) })
-        return START_STICKY
-    }
-}
-```
+| File | Role |
+| --- | --- |
+| `core-go/tunnel/tunnel.go` | the engine: netstack ↔ TUN, fragmentation, DoH, QUIC drop |
+| `app/src/main/java/.../LibertyVpnService.kt` | establishes the TUN, calls `Tunnel.connect`, provides `protect()` |
+| `app/src/main/java/.../MainActivity.kt` | START/STOP + VPN consent + mode picker |
+| `app/src/main/AndroidManifest.xml` | `BIND_VPN_SERVICE`, foreground-service, the VpnService intent-filter |
+| `build-aar.sh` / `.bat` | `gomobile bind` of the Go core |
 
 ## Status
 
-- [x] Shared core + DoH + gomobile facade (`core-go/mobile`), tested in CI.
-- [ ] Go `tunnel` package: wire gVisor netstack to the TUN fd and route TCP/UDP
-      through the facade (the largest remaining piece; model it on Intra's
-      `intra/` package).
-- [ ] Kotlin app: `VpnService`, consent flow (`VpnService.prepare`), start/stop
-      UI, foreground notification, and the `protect()` bridge.
-- [ ] Build + on-device testing in Android Studio (cannot be done from the
-      Python/Windows dev box; the `.aar` and Kotlin compile there).
+- [x] Go packet engine (`core-go/tunnel`) — cross-compiles for android in CI.
+- [x] Kotlin VpnService + UI, gradle project, gomobile bridge.
+- [ ] On-device testing (build the .aar + run in Android Studio on a real phone).
+      The Go side compiles for `GOOS=android` but has not yet been device-tested;
+      expect to iterate on routes/MTU/edge cases on first run.
 
 ## References
 
 - Intra (Go core shared across Android/iOS): https://github.com/Jigsaw-Code/Intra
 - `VpnService.Builder`: https://developer.android.com/reference/android/net/VpnService.Builder
-- gVisor netstack: https://pkg.go.dev/gvisor.dev/gvisor/pkg/tcpip
 - gomobile: https://pkg.go.dev/golang.org/x/mobile/cmd/gomobile
