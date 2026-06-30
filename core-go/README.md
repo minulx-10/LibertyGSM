@@ -23,21 +23,30 @@ Android and iOS.
 ## What's here
 
 - `tlsfrag/` — `FragmentClientHello`, `SNILocation`/`SNIName`, `TLSRecordLen`,
-  and `IsHostExcluded` + `DefaultExcludeHosts`. A faithful port of the Python
-  `tls_frag.py`, with unit tests (`go test ./...`).
+  and `IsHostExcluded` + `DefaultExcludeHosts`. A faithful port of `tls_frag.py`.
+- `doh/` — DoH resolver (RFC 8484 wire format) with automatic HTTP/2 connection
+  pooling and endpoint failover. Port of the Python `DohClient`.
+- `mobile/` — the gomobile-friendly facade (mobile-safe signatures) the Android
+  and iOS wrappers call: `FragmentToWire`, `SNIName`, `IsHostExcluded`,
+  `DefaultExcludeHosts`, and a `Resolver`.
+
+All three have unit tests (`go test ./...`, also run in CI).
 
 ## Status / roadmap
 
 - [x] Fragmentation + SNI + exclude-host core, with tests.
-- [ ] DoH resolver (wire-format, connection pool) — port of the Python `DohClient`.
-- [ ] A minimal gomobile-friendly facade (gomobile can't export `[][]byte`, so
-      expose a small `Fragmenter` object or a length-prefixed buffer).
+- [x] DoH resolver (wire-format, HTTP/2 pooled, failover) — port of `DohClient`.
+- [x] gomobile-friendly facade (`mobile/`): `[][]byte` is exposed via a
+      length-prefixed wire format (`FragmentToWire`); `[]string` via newline
+      strings; DoH via a `Resolver` object.
+- [ ] Go `tunnel` package: gVisor netstack ↔ TUN fd (the shared packet engine
+      for Android/iOS, modeled on Intra). See `../android/README.md`.
 - [ ] Android `VpnService` app wrapping the `.aar`.
 - [ ] iOS/iPadOS `NEPacketTunnelProvider` app wrapping the `.xcframework`
       (needs an Apple Developer account + real-device testing).
 - [ ] Replace the desktop engines' algorithm with this core over time. Until
       then, the Windows runtime keeps using the Python `tls_frag.py`; both are
-      kept byte-for-byte equivalent (same fixtures/tests).
+      kept equivalent (same fixtures/tests).
 
 ## Develop
 
