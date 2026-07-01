@@ -1,0 +1,61 @@
+name: ios-build
+
+# Compile-verify the Apple front-end (apple/) on a FREE GitHub-hosted macOS
+# runner: build the shared Go core into an xcframework via gomobile, generate the
+# Xcode project, and compile the app + packet-tunnel extension for the simulator
+# SDK (no code signing, so no Apple Developer account is needed just to prove it
+# builds). Installing on a real device still needs a Mac + paid account — this
+# only validates that the Swift/Go scaffolding is correct and build-ready.
+
+on:
+  push:
+    paths:
+      - "apple/**"
+      - "core-go/**"
+      - ".github/workflows/ios-build.yml"
+  pull_request:
+    paths:
+      - "apple/**"
+      - "core-go/**"
+  workflow_dispatch:
+
+jobs:
+  ios-compile:
+    name: iOS compile check (unsigned)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: core-go/tunnel/go.mod
+
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: gomobile init
+        run: gomobile init
+
+      - name: Build LibGSM.xcframework (shared Go core)
+        run: ./apple/build-xcframework.sh
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: apple/LibertyGSM
+        run: xcodegen generate
+
+      - name: Compile app + extension (simulator SDK, unsigned)
+        working-directory: apple/LibertyGSM
+        run: |
+          xcodebuild \
+            -project LibertyGSM.xcodeproj \
+            -target LibertyGSMApp \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            CODE_SIGNING_ALLOWED=NO \
+            build
