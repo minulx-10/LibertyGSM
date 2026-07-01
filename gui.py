@@ -18,15 +18,32 @@ try:
 except Exception:
     _HAS_TRAY = False
 
-VERSION = "1.2.2"
+VERSION = "1.2.3"
 
 
-def _make_tray_image():
-    img = Image.new("RGBA", (64, 64), (18, 18, 20, 0))
+def _make_tray_image(size=64):
+    """A crisp tray icon drawn with vector shapes (no font): a purple shield
+    with a white lightning bolt -- protection + speed. Renders cleanly when the
+    OS scales it down to 16/32 px."""
+    s = size
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.rounded_rectangle([4, 4, 60, 60], radius=12, fill=(18, 18, 20, 255),
-                        outline=(168, 85, 247, 255), width=4)
-    d.text((23, 20), "L", fill=(168, 85, 247, 255))
+
+    def pts(norm):
+        return [(x * s, y * s) for x, y in norm]
+
+    # Shield body.
+    shield = [(0.50, 0.06), (0.86, 0.20), (0.86, 0.52),
+              (0.50, 0.94), (0.14, 0.52), (0.14, 0.20)]
+    d.polygon(pts(shield), fill=(168, 85, 247, 255))            # #a855f7
+    # Subtle darker inner edge for depth.
+    inner = [(0.50, 0.13), (0.79, 0.24), (0.79, 0.50),
+             (0.50, 0.85), (0.21, 0.50), (0.21, 0.24)]
+    d.line(pts(inner) + [pts(inner)[0]], fill=(124, 58, 200, 255), width=max(1, s // 32))
+    # Lightning bolt.
+    bolt = [(0.56, 0.24), (0.34, 0.54), (0.47, 0.54),
+            (0.42, 0.78), (0.66, 0.46), (0.52, 0.46), (0.58, 0.24)]
+    d.polygon(pts(bolt), fill=(255, 255, 255, 255))
     return img
 
 
