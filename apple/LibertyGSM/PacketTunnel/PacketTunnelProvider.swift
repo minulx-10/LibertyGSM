@@ -1,6 +1,9 @@
 import NetworkExtension
 import os.log
-import Tunnel   // the gomobile-generated module (apple/LibGSM.xcframework)
+// gomobile names the module after the xcframework's file name (LibGSM), while
+// the exported symbols keep the Go PACKAGE prefix (tunnel → TunnelConnect,
+// TunnelSession, TunnelProtector). So: import LibGSM, call Tunnel*.
+import LibGSM
 
 /// LibertyGSM packet tunnel. It establishes an IPv4-only utun, extracts its file
 /// descriptor, and hands it to the shared Go core (`core-go/tunnel`) — the exact
