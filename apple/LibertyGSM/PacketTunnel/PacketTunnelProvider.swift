@@ -108,8 +108,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
 /// Keeps the Go core's upstream sockets off the tunnel by binding them to the
 /// physical interface (the iOS analogue of Android's `VpnService.protect`).
-/// gomobile maps Go's `Protector` interface to this Swift protocol.
-final class InterfaceProtector: NSObject, TunnelProtector {
+/// gomobile generates both a class `TunnelProtector` and a same-named protocol;
+/// Swift imports the protocol with a `Protocol` suffix, so we conform to
+/// `TunnelProtectorProtocol` (not the class).
+final class InterfaceProtector: NSObject, TunnelProtectorProtocol {
     private let log: OSLog
     init(log: OSLog) { self.log = log }
 
