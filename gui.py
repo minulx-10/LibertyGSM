@@ -18,7 +18,7 @@ try:
 except Exception:
     _HAS_TRAY = False
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 
 
 def _make_tray_image():

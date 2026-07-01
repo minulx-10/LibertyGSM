@@ -68,6 +68,10 @@ _UPSTREAM_HI = UPSTREAM_PORT_BASE + UPSTREAM_PORT_COUNT - 1
 
 HTTPS_CONNECT_TIMEOUT = 8.0
 HTTPS_FIRST_READ_TIMEOUT = 8.0
+# How long to wait for the server's first reply after a fragmented ClientHello.
+# An immediate reset within this window means the server rejected fragmentation
+# (common for .kr sites behind a security appliance) -> retry un-fragmented.
+FRAG_REPLY_TIMEOUT = 3.0
 
 
 def _build_filter(block_quic):
@@ -342,20 +346,19 @@ class _RelayHandler(socketserver.BaseRequestHandler):
             client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except OSError:
             pass
-        try:
-            upstream = _connect_upstream(server_ip, server_port)
-        except OSError as exc:
-            engine.log(f"upstream {server_ip}:{server_port} failed: {exc}", "WARNING")
-            return
-        try:
-            self._relay(engine, client, upstream, server_ip)
-        finally:
-            try:
-                upstream.close()
-            except OSError:
-                pass
+        self._relay(engine, client, server_ip, server_port)
 
-    def _relay(self, engine, client, upstream, server_ip):
+    @staticmethod
+    def _send_fragmented(engine, up, hello):
+        delay = engine.frag_delay()
+        records = fragment_client_hello(hello, engine.mode)
+        for i, rec in enumerate(records):
+            up.sendall(rec)
+            if delay and i < len(records) - 1:
+                time.sleep(delay)
+        return len(records)
+
+    def _relay(self, engine, client, server_ip, server_port):
         hello = _read_client_hello(client)
         if not hello:
             return
@@ -365,31 +368,99 @@ class _RelayHandler(socketserver.BaseRequestHandler):
         # any WebSocket) would time out and get torn down every few seconds.
         client.settimeout(None)
 
-        stats = {"down": 0}
         host = server_ip
-        try:
-            if hello[0] == _TLS_HANDSHAKE:
-                host = sni_name(hello)
-                if is_host_excluded(host, engine.exclude_hosts):
-                    engine.log(f"{host} -> fragmentation bypassed (whitelisted)")
-                    upstream.sendall(hello)
-                else:
-                    records = fragment_client_hello(hello, engine.mode)
-                    delay = engine.frag_delay()
-                    engine.log(f"{host} -> {len(records)} TLS records ({engine.mode})")
-                    for i, rec in enumerate(records):
-                        upstream.sendall(rec)
-                        if delay and i < len(records) - 1:
-                            time.sleep(delay)
-            else:
-                upstream.sendall(hello)
-        except OSError:
+        is_tls = hello[0] == _TLS_HANDSHAKE
+        if is_tls:
+            host = sni_name(hello)
+
+        def connect():
+            try:
+                return _connect_upstream(server_ip, server_port)
+            except OSError as exc:
+                engine.log(f"upstream {server_ip}:{server_port} failed: {exc}", "WARNING")
+                return None
+
+        up = connect()
+        if up is None:
             return
 
-        reverse = threading.Thread(target=_pump, args=(upstream, client, stats), daemon=True)
-        reverse.start()
-        _pump(client, upstream)
-        reverse.join(timeout=2.0)
+        stats = {"down": 0}
+        try:
+            skip_frag = (not is_tls
+                         or is_host_excluded(host, engine.exclude_hosts)
+                         or engine.is_no_frag(host))
+            first = None
+            if skip_frag:
+                if is_tls:
+                    engine.log(f"{host} -> sent as-is (no fragmentation)")
+                up.sendall(hello)
+            else:
+                n = self._send_fragmented(engine, up, hello)
+                engine.log(f"{host} -> {n} TLS records ({engine.mode})")
+                # Peek the first reply: an immediate reset means the SERVER
+                # rejected the fragmentation (not a DPI block). Retry once,
+                # un-fragmented, and remember the host so later connections skip
+                # straight to un-fragmented.
+                try:
+                    up.settimeout(FRAG_REPLY_TIMEOUT)
+                    first = up.recv(65535)
+                except socket.timeout:
+                    first = None            # slow but alive -> keep the fragmented conn
+                except OSError:
+                    first = b""             # reset/closed
+                finally:
+                    try:
+                        up.settimeout(None)
+                    except OSError:
+                        pass
+
+                if first == b"":
+                    # Retry ONCE un-fragmented. Only downgrade the host to
+                    # no-fragmentation if the plain retry actually gets a reply --
+                    # that means the server (not a DPI) rejected the fragments.
+                    # If the plain retry ALSO fails it's a DPI/IP block, so we do
+                    # NOT downgrade (keep fragmenting future connections, which is
+                    # what actually gets a probabilistically-blocked site through).
+                    engine.log(f"{host} -> fragmentation rejected; retrying un-fragmented", "WARNING")
+                    try:
+                        up.close()
+                    except OSError:
+                        pass
+                    up = connect()
+                    if up is None:
+                        return
+                    up.sendall(hello)       # plain ClientHello
+                    try:
+                        up.settimeout(FRAG_REPLY_TIMEOUT)
+                        first = up.recv(65535)
+                    except socket.timeout:
+                        first = None
+                    except OSError:
+                        first = b""
+                    finally:
+                        try:
+                            up.settimeout(None)
+                        except OSError:
+                            pass
+                    if first:
+                        engine.remember_no_frag(host)
+                        engine.log(f"{host} -> works un-fragmented; will skip fragmentation")
+
+            if first:
+                stats["down"] += len(first)
+                client.sendall(first)
+
+            reverse = threading.Thread(target=_pump, args=(up, client, stats), daemon=True)
+            reverse.start()
+            _pump(client, up)
+            reverse.join(timeout=2.0)
+        except OSError:
+            pass
+        finally:
+            try:
+                up.close()
+            except OSError:
+                pass
 
         with engine._stats_lock:
             engine.stats["https_total"] += 1
@@ -424,6 +495,7 @@ class DivertEngine:
         self.conn_map = {}                  # (src_addr,src_port)->(dst_addr,dst_port)
         self.doh = DohClient()
         self.exclude_hosts = load_exclude_hosts()
+        self.no_frag_hosts = set()          # hosts learned at runtime to reject fragmentation
         self.stats = {"dns": 0, "https_total": 0, "https_reset": 0, "quic": 0}
         self._stats_lock = threading.Lock()
         self._w = None
@@ -441,6 +513,15 @@ class DivertEngine:
 
     def frag_delay(self):
         return {"Extreme": 0.006, "Advanced": 0.003}.get(self.mode, 0.004)
+
+    def is_no_frag(self, host):
+        with self._stats_lock:
+            return host in self.no_frag_hosts
+
+    def remember_no_frag(self, host):
+        if host and host not in ("<no-sni>", "<empty>"):
+            with self._stats_lock:
+                self.no_frag_hosts.add(host)
 
     # -- lifecycle --------------------------------------------------------- #
     def start(self):
