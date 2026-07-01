@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, scrolledtext
+import atexit
 import ctypes
 import os
 import queue
@@ -18,7 +19,7 @@ try:
 except Exception:
     _HAS_TRAY = False
 
-VERSION = "1.2.3"
+VERSION = "1.3.2"
 
 
 def _make_tray_image(size=64):
@@ -482,17 +483,29 @@ class LibertyGSMApp:
         else:
             self._real_quit()
 
-    def _real_quit(self):
+    def _cleanup(self):
+        """Release the WinDivert driver + DLL and stop the tray. Idempotent, and
+        safe to call from ANY exit path -- crucially including Windows shutdown/
+        logoff, where Tk's mainloop just returns without going through the tray
+        'Quit' menu. Without this, the WinDivert driver stays loaded, its .sys/
+        .dll are locked inside the PyInstaller onefile temp dir, the bootloader
+        fails to delete it, and the resulting "Failed to remove temporary
+        directory" dialog blocks the whole PC from shutting down.
+        """
+        if getattr(self, "_cleaned", False):
+            return
+        self._cleaned = True
+
         if self.engine:
             try:
                 self.engine.stop()
             except Exception:
                 pass
+            self.engine = None
 
         if sys.platform == "win32":
             # Unload the WinDivert DLL to release the file lock for PyInstaller cleanup.
             try:
-                import ctypes
                 import pydivert.windivert_dll as w
                 handle = ctypes.windll.kernel32.GetModuleHandleW(w.DLL_PATH)
                 if handle:
@@ -506,7 +519,13 @@ class LibertyGSMApp:
                 self.tray_icon.stop()
             except Exception:
                 pass
-        self.root.destroy()
+
+    def _real_quit(self):
+        self._cleanup()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
         sys.exit(0)
 
 
@@ -543,4 +562,12 @@ if __name__ == "__main__":
 
     root = tk.Tk()
     app = LibertyGSMApp(root)
-    root.mainloop()
+    # Guarantee the WinDivert driver/DLL are released no matter how we exit --
+    # tray Quit, window close, or a Windows shutdown that just unwinds mainloop.
+    # atexit is the backstop; the explicit call handles the shutdown path where
+    # mainloop returns without SystemExit.
+    atexit.register(app._cleanup)
+    try:
+        root.mainloop()
+    finally:
+        app._cleanup()
