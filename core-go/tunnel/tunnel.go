@@ -19,6 +19,7 @@
 package tunnel
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -49,9 +50,22 @@ import (
 )
 
 const (
-	nicID    = 1
-	mtu      = 1500
-	firstRTO = 8 * time.Second
+	nicID = 1
+	mtu   = 1500
+	// dnsSinkIP is the fake DNS server the native side advertises
+	// (VpnService.addDnsServer). We only answer UDP/53 (DoH) on it; anything
+	// else -- notably a Private-DNS DoT probe to :853 -- has nothing to dial, so
+	// we refuse it instantly instead of letting it hang for firstRTO. See
+	// handleTCP. MUST match LibertyVpnService.kt's addDnsServer.
+	dnsSinkIP = "10.111.0.2"
+	firstRTO  = 8 * time.Second
+	// fragGap is a short pause inserted between the fragmented pieces of the
+	// first payload so the OS emits each piece as its OWN TCP segment instead of
+	// coalescing them back together. The desktop (WinDivert) engine crafts
+	// separate packets directly; here we ride a normal kernel socket, so without
+	// this gap a DPI box can still reassemble the whole SNI/Host from one
+	// segment. One-time per connection, so the latency cost is negligible.
+	fragGap = 6 * time.Millisecond
 )
 
 // Protector is implemented by the native side (Android VpnService.protect / the
@@ -78,6 +92,23 @@ type Session struct {
 	dnsCount  atomic.Int64
 	tcpCount  atomic.Int64
 	quicCount atomic.Int64
+
+	dbgIn   atomic.Int64
+	dbgOut  atomic.Int64
+	dbgFrag atomic.Int64
+	dbgDNS  atomic.Int64
+}
+
+// logf is a package alias for log.Printf, used where a local closure shadows the
+// log package name (see sendFirstPayload).
+var logf = log.Printf
+
+// dbg logs the first `n` events of a category (rate-limited so per-packet loops
+// don't flood logcat). Appears in Android logcat under the "GoLog" tag.
+func dbg(counter *atomic.Int64, n int64, format string, args ...any) {
+	if counter.Add(1) <= n {
+		log.Printf("[libgsm] "+format, args...)
+	}
 }
 
 // Connect starts a tunnel on the given TUN file descriptor. mode is "Standard",
@@ -123,6 +154,7 @@ func Connect(fd int, mode, excludeHostsNewlineSep string, prot Protector) (*Sess
 
 	go s.inboundLoop()
 	go s.outboundLoop()
+	log.Printf("[libgsm] tunnel started (fd=%d, mode=%s, quic=allowed)", fd, mode)
 	return s, nil
 }
 
@@ -168,6 +200,7 @@ func (s *Session) inboundLoop() {
 	for {
 		n, err := s.tun.Read(buf)
 		if err != nil {
+			log.Printf("[libgsm] tun read error: %v (inbound loop exiting)", err)
 			return
 		}
 		if n < 1 {
@@ -177,6 +210,7 @@ func (s *Session) inboundLoop() {
 		if buf[0]>>4 == 6 {
 			proto = header.IPv6ProtocolNumber
 		}
+		dbg(&s.dbgIn, 12, "inbound #%d %dB proto=%#x", s.dbgIn.Load(), n, proto)
 		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(buf[:n])})
 		s.ep.InjectInbound(proto, pkt)
 		pkt.DecRef()
@@ -191,7 +225,9 @@ func (s *Session) outboundLoop() {
 			return // context cancelled
 		}
 		view := pkt.ToView()
-		_, _ = s.tun.Write(view.AsSlice())
+		b := view.AsSlice()
+		dbg(&s.dbgOut, 12, "outbound #%d %dB", s.dbgOut.Load(), len(b))
+		_, _ = s.tun.Write(b)
 		view.Release()
 		pkt.DecRef()
 	}
@@ -228,6 +264,12 @@ func guard(tag string) {
 func (s *Session) handleTCP(r *tcp.ForwarderRequest) {
 	defer guard("handleTCP")
 	id := r.ID()
+	// Refuse TCP to our DNS sink immediately (RST) so a Private-DNS DoT probe
+	// falls straight back to UDP/53 (DoH) instead of stalling for firstRTO.
+	if addrString(id.LocalAddress) == dnsSinkIP {
+		r.Complete(true)
+		return
+	}
 	var wq waiter.Queue
 	ep, terr := r.CreateEndpoint(&wq)
 	if terr != nil {
@@ -235,9 +277,12 @@ func (s *Session) handleTCP(r *tcp.ForwarderRequest) {
 		return
 	}
 	r.Complete(false)
-	s.tcpCount.Add(1)
+	c := s.tcpCount.Add(1)
 	local := gonet.NewTCPConn(&wq, ep)
 	dst := net.JoinHostPort(addrString(id.LocalAddress), strconv.Itoa(int(id.LocalPort)))
+	if c <= 25 {
+		log.Printf("[libgsm] TCP #%d -> %s", c, dst)
+	}
 	go s.pipeTCP(local, dst)
 }
 
@@ -246,32 +291,142 @@ func (s *Session) pipeTCP(local net.Conn, dst string) {
 	defer local.Close()
 	up, err := s.dial("tcp", dst)
 	if err != nil {
+		log.Printf("[libgsm] dial tcp %s FAILED: %v", dst, err)
 		return
 	}
 	defer up.Close()
 
 	mode, hosts := s.snapshot()
-	local.SetReadDeadline(time.Now().Add(firstRTO))
-	first := make([]byte, 65535)
-	n, rerr := local.Read(first)
-	local.SetReadDeadline(time.Time{})
-	if n > 0 {
-		hello := first[:n]
-		if hello[0] == 0x16 && !tlsfrag.IsHostExcluded(tlsfrag.SNIName(hello), hosts) {
-			for _, rec := range tlsfrag.FragmentClientHello(hello, mode) {
-				if _, err := up.Write(rec); err != nil {
-					return
-				}
-			}
-		} else if _, err := up.Write(hello); err != nil {
+	first, rerr := s.readFirstPayload(local)
+	if len(first) == 0 {
+		if rerr != nil {
 			return
 		}
-	} else if rerr != nil {
-		return
+	} else {
+		if err := s.sendFirstPayload(up, first, dst, mode, hosts); err != nil {
+			return
+		}
 	}
 
 	go func() { _, _ = io.Copy(up, local) }()
 	_, _ = io.Copy(local, up)
+}
+
+// readFirstPayload reads the client's opening bytes. For a TLS ClientHello it
+// keeps reading until the ENTIRE handshake record is in hand: a large
+// ClientHello (many extensions, ALPN, a session ticket -- e.g. chess.com) spans
+// two TUN packets, and fragmenting only the first half would parse no SNI and
+// leak the hostname in the clear.
+func (s *Session) readFirstPayload(local net.Conn) ([]byte, error) {
+	local.SetReadDeadline(time.Now().Add(firstRTO))
+	defer local.SetReadDeadline(time.Time{})
+
+	buf := make([]byte, 16384)
+	n, err := local.Read(buf)
+	if n <= 0 {
+		return nil, err
+	}
+	first := append([]byte(nil), buf[:n]...)
+	if first[0] == 0x16 { // TLS handshake -- make sure we have the whole record
+		if recLen, ok := tlsfrag.TLSRecordLen(first); ok {
+			for len(first) < 5+recLen {
+				m, e := local.Read(buf)
+				if m > 0 {
+					first = append(first, buf[:m]...)
+				}
+				if e != nil {
+					break
+				}
+			}
+		}
+	}
+	return first, nil
+}
+
+// sendFirstPayload applies the DPI bypass to the opening bytes and writes them
+// upstream. TLS ClientHellos are record-fragmented through the SNI; plaintext
+// HTTP requests get their Host header split; each piece is flushed as its own
+// TCP segment (see fragGap) so the DPI never sees a whole hostname in one place.
+func (s *Session) sendFirstPayload(up net.Conn, first []byte, dst, mode string, hosts []string) error {
+	log := func(format string, args ...any) {
+		if s.dbgFrag.Add(1) <= 80 {
+			logf("[libgsm] "+format, args...)
+		}
+	}
+
+	if first[0] == 0x16 { // TLS ClientHello
+		sni := tlsfrag.SNIName(first)
+		if tlsfrag.IsHostExcluded(sni, hosts) {
+			log("TLS %s sni=%q EXCLUDED (plain)", dst, sni)
+			_, err := up.Write(first)
+			return err
+		}
+		recs := tlsfrag.FragmentClientHello(first, mode)
+		log("TLS %s sni=%q -> %d records (helloLen=%d)", dst, sni, len(recs), len(first))
+		return writeSegments(up, recs)
+	}
+
+	if pieces, host := splitHTTPHost(first); pieces != nil { // plaintext HTTP
+		log("HTTP %s host=%q -> split into %d segments", dst, host, len(pieces))
+		return writeSegments(up, pieces)
+	}
+
+	_, err := up.Write(first)
+	return err
+}
+
+// writeSegments writes each piece and pauses briefly between them so the kernel
+// pushes each as a separate TCP segment (defeating segment-reassembling DPI).
+func writeSegments(up net.Conn, pieces [][]byte) error {
+	for i, p := range pieces {
+		if i > 0 {
+			time.Sleep(fragGap)
+		}
+		if _, err := up.Write(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// splitHTTPHost splits a plaintext HTTP request in the MIDDLE of its Host header
+// value, so no single TCP segment carries the whole hostname. Returns nil when
+// the buffer is not an HTTP request with a usable Host header.
+func splitHTTPHost(req []byte) (pieces [][]byte, host string) {
+	if !looksLikeHTTP(req) {
+		return nil, ""
+	}
+	i := bytes.Index(bytes.ToLower(req), []byte("host:"))
+	if i < 0 {
+		return nil, ""
+	}
+	p := i + len("host:")
+	for p < len(req) && (req[p] == ' ' || req[p] == '\t') {
+		p++
+	}
+	start, end := p, p
+	for end < len(req) && req[end] != '\r' && req[end] != '\n' && req[end] != ':' {
+		end++
+	}
+	if end-start < 2 {
+		return nil, string(req[start:end])
+	}
+	cut := start + (end-start)/2
+	return [][]byte{append([]byte(nil), req[:cut]...), append([]byte(nil), req[cut:]...)}, string(req[start:end])
+}
+
+var httpMethods = [][]byte{
+	[]byte("GET "), []byte("POST "), []byte("HEAD "), []byte("PUT "),
+	[]byte("DELETE "), []byte("OPTIONS "), []byte("PATCH "), []byte("TRACE "),
+}
+
+func looksLikeHTTP(req []byte) bool {
+	for _, m := range httpMethods {
+		if bytes.HasPrefix(req, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- UDP: DoH for :53, drop :443 (QUIC), forward the rest --------------------
@@ -289,6 +444,7 @@ func (s *Session) handleUDP(r *udp.ForwarderRequest) bool {
 		return true
 	}
 	conn := gonet.NewUDPConn(&wq, ep)
+	dbg(&s.dbgDNS, 8, "UDP -> %s:%d", addrString(id.LocalAddress), id.LocalPort)
 	if id.LocalPort == 53 {
 		go s.handleDNS(conn)
 	} else {
@@ -304,13 +460,16 @@ func (s *Session) handleDNS(conn net.Conn) {
 	q := make([]byte, 1500)
 	n, err := conn.Read(q)
 	if err != nil || n == 0 {
+		log.Printf("[libgsm] DNS read err: %v (n=%d)", err, n)
 		return
 	}
 	ans, err := s.doh.Resolve(q[:n])
 	if err != nil {
+		log.Printf("[libgsm] DoH resolve FAILED: %v", err)
 		return // fail closed: drop rather than leak the plaintext query
 	}
 	s.dnsCount.Add(1)
+	dbg(&s.dbgDNS, 8, "DoH ok: %dB query -> %dB answer", n, len(ans))
 	_, _ = conn.Write(ans)
 }
 

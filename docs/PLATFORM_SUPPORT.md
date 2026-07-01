@@ -12,7 +12,7 @@ non-Windows hosts can run the portable local proxy preview.
 | Windows 10/11 | Supported | WinDivert via `pydivert` | Current production path. Requires Administrator. |
 | macOS | Preview | Portable local proxy | Requires manual HTTP/HTTPS proxy settings. Full-system mode still needs a signed Network Extension target and device testing. |
 | Linux desktop | Preview | Portable local proxy | Requires manual HTTP/HTTPS proxy settings. Full-system mode needs a TUN/netfilter backend. |
-| Android | Not release-supported yet | `VpnService` / TUN | Needs a native Android service that reads/writes the VPN file descriptor. |
+| Android | Supported (5.0+/API 21) | `VpnService` / TUN + Go core (`core-go/tunnel`) | System-wide, all apps. Go gVisor netstack drives the TUN fd; DoH for DNS, TLS ClientHello record fragmentation, QUIC dropped to TCP. Tested on a real device on a filtered school network. |
 | iOS | Not release-supported yet | `NEPacketTunnelProvider` | Needs Apple Network Extension entitlement, app extension, signing, and real-device testing. |
 | iPadOS | Not release-supported yet | `NEPacketTunnelProvider` | Same constraints as iOS. |
 
@@ -34,9 +34,14 @@ build must therefore include a native Network Extension target, correct
 entitlements, signing, install/activation UX, and device-level packet tests.
 
 Android's `VpnService` creates a VPN interface with `VpnService.Builder` and
-returns a file descriptor for packet exchange. A release-quality Android build
-must include a native service, VPN consent flow, lifecycle/revoke handling, and
-packet tests on real devices.
+returns a file descriptor for packet exchange. The shipped Android build
+(`android/`) does exactly this: `LibertyVpnService` establishes an IPv4 TUN and
+hands the fd to the shared Go core (`core-go/tunnel`, gomobile-bound to
+`libgsm.aar`), which drives a gVisor userspace TCP/IP stack — DoH for DNS, TLS
+record fragmentation for TCP, QUIC dropped so apps fall back to fragmented TCP.
+The native side only implements `VpnService.protect` so the core's upstream
+sockets escape the tunnel. Consent flow, foreground service, and revoke handling
+are wired up; verified on a real device on a filtered school network.
 
 Reference APIs:
 

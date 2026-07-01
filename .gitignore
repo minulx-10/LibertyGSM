@@ -28,3 +28,8 @@ android/local.properties
 android/app/libs/*.aar
 
 android/app/libs/*.jar
+
+# Release signing — never commit keys or their passwords
+android/keystore.properties
+*.jks
+*.keystore

@@ -16,11 +16,14 @@ Use this checklist before publishing a build or GitHub release.
 
 ## Platform claims
 
-- Only list Windows as full-system transparent supported until a native engine
-  lands for another OS.
+- Windows (WinDivert) and Android (`VpnService`) are full-system transparent
+  supported. List any other OS as supported only once its native engine lands.
 - macOS/Linux desktop may be listed as local-proxy preview only.
 - macOS must not be marked supported until a signed Network Extension build is tested.
-- Android must not be marked supported until a `VpnService` build is tested.
+- Android release: build the `.aar` (`android/build-aar.sh`, gomobile bind of
+  `core-go/tunnel`), then `assembleRelease` a signed APK (see
+  `android/keystore.properties`), install it on a real device, and confirm a
+  blocked site loads on a filtered network before attaching the APK to the release.
 - iOS/iPadOS must not be marked supported until `NEPacketTunnelProvider`,
   entitlements, signing, and real-device tests are complete.
 

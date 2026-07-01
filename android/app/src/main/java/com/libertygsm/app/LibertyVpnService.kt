@@ -40,13 +40,16 @@ class LibertyVpnService : VpnService() {
     private fun startTunnel(mode: String) {
         if (session != null) return
 
+        // IPv4-only (like the Windows engine). Advertising IPv6 here makes apps
+        // prefer AAAA records and connect over IPv6, but our protected upstream
+        // sockets have no IPv6 route on most Korean mobile/Wi-Fi networks
+        // ("network is unreachable"). Not routing IPv6 lets apps fall back to
+        // IPv4, which goes through the tunnel and works.
         val pfd: ParcelFileDescriptor = Builder()
             .setSession("LibertyGSM")
             .setMtu(1500)
             .addAddress("10.111.0.1", 32)
             .addRoute("0.0.0.0", 0)        // capture all IPv4
-            .addAddress("fd00:1111::1", 128)
-            .addRoute("::", 0)             // capture all IPv6
             .addDnsServer("10.111.0.2")    // sink DNS into the tunnel
             .setBlocking(true)
             .establish() ?: run {
