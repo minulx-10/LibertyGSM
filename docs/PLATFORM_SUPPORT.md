@@ -13,8 +13,8 @@ non-Windows hosts can run the portable local proxy preview.
 | macOS | Preview | Portable local proxy | Requires manual HTTP/HTTPS proxy settings. Full-system mode still needs a signed Network Extension target and device testing. |
 | Linux desktop | Preview | Portable local proxy | Requires manual HTTP/HTTPS proxy settings. Full-system mode needs a TUN/netfilter backend. |
 | Android | Supported (5.0+/API 21) | `VpnService` / TUN + Go core (`core-go/tunnel`) | System-wide, all apps. Go gVisor netstack drives the TUN fd; DoH for DNS, TLS ClientHello record fragmentation, QUIC dropped to TCP. Tested on a real device on a filtered school network. |
-| iOS | Not release-supported yet | `NEPacketTunnelProvider` | Needs Apple Network Extension entitlement, app extension, signing, and real-device testing. |
-| iPadOS | Not release-supported yet | `NEPacketTunnelProvider` | Same constraints as iOS. |
+| iOS | Scaffolded, not built | `NEPacketTunnelProvider` + Go core (`core-go/tunnel`) | Swift extension + container app + xcframework build script in `apple/` reuse the same Go core as Android. Written on Windows and **not yet compiled** — needs a Mac + Xcode + paid Apple Developer account to build, sign, and device-test. See `apple/README.md`. |
+| iPadOS | Scaffolded, not built | `NEPacketTunnelProvider` + Go core | Same target as iOS (universal app). |
 
 ## Why the non-Windows targets are gated
 

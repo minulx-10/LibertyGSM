@@ -1,0 +1,6 @@
+# Shell scripts must stay LF or they break when run on macOS/Linux.
+*.sh text eol=lf
+# Keep Swift/Go/Kotlin sources LF for consistent cross-platform diffs.
+*.swift text eol=lf
+*.go text eol=lf
+*.kt text eol=lf
