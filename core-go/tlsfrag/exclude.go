@@ -2,18 +2,11 @@ package tlsfrag
 
 import "strings"
 
-// DefaultExcludeHosts mirrors the Python default whitelist: hosts whose servers
-// (or fronting security appliances) reject record-fragmented ClientHellos.
-// NOTE: on a network that actively SNI-blocks these hosts, excluding them is
-// counterproductive -- the plaintext SNI then gets reset. Treat this as an
-// editable default, not a hard rule.
-var DefaultExcludeHosts = []string{
-	"*.nexon.com",
-	"*.nexon.co.kr",
-	"*.nx.com",
-	"*.nexon.io",
-	"*.nexon.net",
-}
+// DefaultExcludeHosts is empty: on a DPI network the whole point is to fragment
+// everything. Excluding a host sends its plaintext SNI as-is, which the DPI then
+// blocks -- the opposite of what we want. Add a host only if fragmenting it
+// breaks that specific site's own server.
+var DefaultExcludeHosts = []string{}
 
 // IsHostExcluded reports whether host matches any pattern in patterns. A pattern
 // of the form "*.example.com" matches example.com and any subdomain; a bare

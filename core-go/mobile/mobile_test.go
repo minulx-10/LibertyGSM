@@ -73,10 +73,15 @@ func TestFragmentToWireRoundTrip(t *testing.T) {
 }
 
 func TestExcludeFacade(t *testing.T) {
-	if !IsHostExcluded("login.nexon.com", DefaultExcludeHosts()) {
-		t.Error("expected *.nexon.com default to exclude login.nexon.com")
+	// Nothing is excluded by default (fragment everything on a DPI network).
+	if DefaultExcludeHosts() != "" {
+		t.Errorf("DefaultExcludeHosts should be empty, got %q", DefaultExcludeHosts())
 	}
-	if IsHostExcluded("www.google.com", DefaultExcludeHosts()) {
-		t.Error("google.com must not be excluded by default")
+	if IsHostExcluded("login.nexon.com", DefaultExcludeHosts()) {
+		t.Error("the default list must exclude nothing")
+	}
+	// An explicit newline-separated pattern still matches.
+	if !IsHostExcluded("login.nexon.com", "*.nexon.com\nexample.org") {
+		t.Error("explicit *.nexon.com should match login.nexon.com")
 	}
 }

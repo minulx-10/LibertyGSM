@@ -22,6 +22,10 @@ import sys
 _TLS_HANDSHAKE = 0x16
 _TLS_VERSIONS = {0x0301, 0x0302, 0x0303, 0x0304}
 
+# The pre-1.2.0 built-in default whitelist. Kept only to auto-clear it on upgrade
+# (excluding these hurt on DPI networks); see load_exclude_hosts.
+_LEGACY_DEFAULT_HOSTS = {"*.nexon.com", "*.nexon.co.kr", "*.nx.com", "*.nexon.io", "*.nexon.net"}
+
 
 def get_exclude_hosts_path() -> str:
     if getattr(sys, "frozen", False):
@@ -36,13 +40,11 @@ def get_exclude_hosts_path() -> str:
 
 def load_exclude_hosts() -> set[str]:
     path = get_exclude_hosts_path()
-    default_hosts = [
-        "*.nexon.com",
-        "*.nexon.co.kr",
-        "*.nx.com",
-        "*.nexon.io",
-        "*.nexon.net"
-    ]
+    # No hosts are excluded by default: on a DPI network the whole point is to
+    # fragment everything. (Excluding a host means its plaintext SNI is sent as-is,
+    # which a school/ISP DPI then blocks -- the opposite of what we want.) Add a
+    # domain here only if fragmenting it breaks that specific site's own server.
+    default_hosts = []
     if not os.path.exists(path):
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -65,6 +67,21 @@ def load_exclude_hosts() -> set[str]:
                     hosts.add(line.lower())
     except Exception:
         return set(default_hosts)
+
+    # Auto-migrate upgraders: if the file still holds exactly the old built-in
+    # Nexon default (user never edited it), clear it -- excluding those on a DPI
+    # network is what was blocking Nexon. Files with any custom entry are left
+    # untouched.
+    if hosts == _LEGACY_DEFAULT_HOSTS:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("# LibertyGSM - Exclude Hosts\n")
+                f.write("# Domains listed here bypass TLS record-layer fragmentation.\n")
+                f.write("# Empty by default. Add a domain only if fragmenting it breaks that site.\n")
+                f.write("# Wildcards are supported (e.g., *.example.com).\n")
+        except Exception:
+            pass
+        return set()
     return hosts
 
 

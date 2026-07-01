@@ -18,6 +18,8 @@ try:
 except Exception:
     _HAS_TRAY = False
 
+VERSION = "1.2.0"
+
 
 def _make_tray_image():
     img = Image.new("RGBA", (64, 64), (18, 18, 20, 0))
@@ -31,7 +33,7 @@ def _make_tray_image():
 class LibertyGSMApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("LibertyGSM - System-wide Bypass")
+        self.root.title(f"LibertyGSM v{VERSION}")
         self.root.geometry("620x680")
         self.root.configure(bg="#121214")
         self.root.resizable(False, False)
@@ -88,7 +90,7 @@ class LibertyGSMApp:
         header.pack(fill=tk.X, pady=(0, 15))
         tk.Label(header, text="LibertyGSM", font=("Segoe UI", 28, "bold"),
                  fg="#a855f7", bg="#121214").pack(anchor="w")
-        subtitle = "System-wide DPI / SNI Bypass  ·  DNS-over-HTTPS"
+        subtitle = f"v{VERSION}  ·  System-wide DPI / SNI Bypass  ·  DNS-over-HTTPS"
         if self.engine_info.supported:
             subtitle = f"{subtitle}  ·  {self.engine_info.name}"
         tk.Label(header, text=subtitle,
