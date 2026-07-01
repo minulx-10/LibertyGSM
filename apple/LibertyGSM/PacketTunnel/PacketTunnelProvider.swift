@@ -39,17 +39,23 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
             let mode = (options?["mode"] as? String) ?? "Standard"
             let protector = InterfaceProtector(log: self.log)
-            do {
-                // gomobile: package `tunnel` → `TunnelConnect`, `TunnelSession`.
-                self.session = try TunnelConnect(Int(fd), mode, "", protector)
-                os_log("tunnel started (fd=%d, mode=%{public}@)",
-                       log: self.log, type: .info, fd, mode)
-                completionHandler(nil)
-            } catch {
+
+            // gomobile emits package-level funcs as global C functions, so the
+            // Go `(*Session, error)` return is NOT bridged to Swift `throws` —
+            // the trailing NSError** is an explicit parameter. Pass &err.
+            var err: NSError?
+            guard let created = TunnelConnect(Int(fd), mode, "", protector, &err) else {
+                let e = err ?? NSError(domain: "com.libertygsm.app", code: 2,
+                                       userInfo: [NSLocalizedDescriptionKey: "TunnelConnect returned nil"])
                 os_log("TunnelConnect failed: %{public}@",
-                       log: self.log, type: .error, error.localizedDescription)
-                completionHandler(error)
+                       log: self.log, type: .error, e.localizedDescription)
+                completionHandler(e)
+                return
             }
+            self.session = created
+            os_log("tunnel started (fd=%d, mode=%{public}@)",
+                   log: self.log, type: .info, fd, mode)
+            completionHandler(nil)
         }
     }
 
