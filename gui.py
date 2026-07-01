@@ -18,7 +18,7 @@ try:
 except Exception:
     _HAS_TRAY = False
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 
 def _make_tray_image():
@@ -140,6 +140,15 @@ class LibertyGSMApp:
         tk.Label(config, text=detail_text,
                  font=("Segoe UI", 9), fg="#6b7280", bg="#121214", wraplength=560, justify="left"
                  ).pack(anchor="w", pady=(8, 0))
+
+        # QUIC toggle: off (default) keeps non-blocked sites fast via native
+        # HTTP/3; on forces everything onto the fragmented TCP path.
+        self.var_quic_block = tk.BooleanVar(value=False)
+        self.chk_quic = tk.Checkbutton(
+            config, text="QUIC 차단 (막힌 사이트 호환성 ↑ / 전체 속도 ↓, 적용은 STOP→START)",
+            variable=self.var_quic_block, font=("Segoe UI", 9), bg="#121214", fg="#d1d5db",
+            selectcolor="#1e1e24", activebackground="#121214", activeforeground="#ffffff", cursor="hand2")
+        self.chk_quic.pack(anchor="w", pady=(6, 0))
 
         if _HAS_TRAY:
             tray_info = "💡 [트레이 안내] 창을 닫아도 백그라운드(시스템 트레이)에서 계속 실행됩니다.\n완전히 종료하려면 트레이 아이콘을 우클릭하여 '종료'를 선택하세요."
@@ -405,6 +414,8 @@ class LibertyGSMApp:
             self.log_message(f"[{time.strftime('%H:%M:%S')}] [ERROR] Start failed: {exc}")
             self._finish_start(False)
             return
+        if hasattr(self.engine, "block_quic"):
+            self.engine.block_quic = self.var_quic_block.get()
         # start() does a (blocking) DoH probe + driver open -> run off the UI thread.
         threading.Thread(target=self._start_worker, daemon=True).start()
 

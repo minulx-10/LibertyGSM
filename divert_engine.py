@@ -70,13 +70,18 @@ HTTPS_CONNECT_TIMEOUT = 8.0
 HTTPS_FIRST_READ_TIMEOUT = 8.0
 
 
-def _build_filter():
+def _build_filter(block_quic):
     doh_excl = "".join(f" and ip.DstAddr != {ip}" for ip in DOH_IPS)
     ports = " or ".join(f"tcp.DstPort == {p}" for p in INTERCEPT_TCP_PORTS)
+    # When block_quic is False we don't capture UDP/443 at all, so QUIC/HTTP3
+    # traffic stays in the kernel and runs at native speed (non-blocked sites
+    # bypass the userspace relay entirely). When True we capture and drop it to
+    # force apps onto the fragmented TCP path.
+    quic = " or (outbound and udp.DstPort == 443)" if block_quic else ""
     return (
         "ip and ("
         "(outbound and udp.DstPort == 53)"
-        " or (outbound and udp.DstPort == 443)"   # QUIC/HTTP3 -> dropped (force TCP)
+        f"{quic}"
         f" or (outbound and ({ports}){doh_excl}"
         f" and (tcp.SrcPort < {UPSTREAM_PORT_BASE} or tcp.SrcPort > {_UPSTREAM_HI}))"
         f" or (tcp.SrcPort == {RELAY_PORT})"
@@ -412,6 +417,10 @@ class DivertEngine:
         self.mode = mode
         self.log_callback = log_callback
         self.event_callback = event_callback
+        # Default False: allow QUIC (non-blocked sites stay fast via HTTP/3 and
+        # bypass the relay). The GUI can set this True before start() to force
+        # everything onto the fragmented TCP path on QUIC-blocking networks.
+        self.block_quic = False
         self.conn_map = {}                  # (src_addr,src_port)->(dst_addr,dst_port)
         self.doh = DohClient()
         self.exclude_hosts = load_exclude_hosts()
@@ -448,7 +457,8 @@ class DivertEngine:
         threading.Thread(target=self._relay_server.serve_forever,
                          name="relay", daemon=True).start()
 
-        filter_str = _build_filter()
+        self.log(f"QUIC: {'blocked (force TCP)' if self.block_quic else 'allowed (native HTTP/3 stays fast)'}")
+        filter_str = _build_filter(self.block_quic)
         try:
             self._w = pydivert.WinDivert(filter_str)
             self._w.open()
