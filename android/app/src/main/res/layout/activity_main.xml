@@ -15,17 +15,27 @@
         android:layout_marginTop="48dp" />
 
     <TextView
+        android:id="@+id/version"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="System-wide DPI / SNI bypass"
+        android:text="v1.3.0"
+        android:textSize="13sp"
+        android:alpha="0.6"
+        android:layout_marginTop="2dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="모든 앱 시스템 전역 우회 (DPI / SNI)"
         android:textSize="14sp"
+        android:layout_marginTop="8dp"
         android:layout_marginBottom="48dp" />
 
     <TextView
         android:id="@+id/status"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="BYPASS INACTIVE"
+        android:text="꺼짐"
         android:textSize="20sp"
         android:textStyle="bold"
         android:layout_marginBottom="24dp" />

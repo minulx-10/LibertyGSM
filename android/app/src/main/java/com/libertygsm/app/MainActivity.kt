@@ -24,8 +24,24 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         binding.toggle.setOnClickListener { if (running) stop() else start() }
+        binding.version.text = "v" + appVersionName()
         render()
     }
+
+    override fun onResume() {
+        super.onResume()
+        // The service may have kept running (or been revoked) while we were away.
+        running = LibertyVpnService.isRunning
+        render()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun appVersionName(): String =
+        try {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+        } catch (_: Exception) {
+            "?"
+        }
 
     private fun selectedMode(): String = when (binding.modeSpinner.selectedItemPosition) {
         1 -> "Advanced"
@@ -52,7 +68,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun render() {
-        binding.status.text = if (running) "BYPASS ACTIVE" else "BYPASS INACTIVE"
+        binding.status.text = if (running) "우회 작동 중 — 모든 앱 보호" else "꺼짐"
         binding.toggle.text = if (running) "STOP" else "START"
         binding.modeSpinner.isEnabled = !running
     }

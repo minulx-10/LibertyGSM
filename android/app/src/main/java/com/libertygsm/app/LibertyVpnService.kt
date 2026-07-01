@@ -62,6 +62,7 @@ class LibertyVpnService : VpnService() {
             // Go takes ownership of the fd and closes it on Session.stop().
             // Empty whitelist: fragment everything (the school-network default).
             session = Tunnel.connect(pfd.detachFd().toLong(), mode, "", protector)
+            isRunning = true
         } catch (e: Exception) {
             stopTunnel()
         }
@@ -73,6 +74,7 @@ class LibertyVpnService : VpnService() {
         } catch (_: Exception) {
         }
         session = null
+        isRunning = false
         stopForegroundCompat()
         stopSelf()
     }
@@ -125,6 +127,13 @@ class LibertyVpnService : VpnService() {
     }
 
     companion object {
+        // Read by MainActivity.onResume so the UI reflects the real tunnel state
+        // when the app is reopened (the service may still be running in the
+        // background, or may have been revoked/stopped while the app was away).
+        @Volatile
+        var isRunning = false
+            private set
+
         const val ACTION_STOP = "com.libertygsm.app.STOP"
         const val EXTRA_MODE = "mode"
         private const val CHANNEL_ID = "libertygsm"
