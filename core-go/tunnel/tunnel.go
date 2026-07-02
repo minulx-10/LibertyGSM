@@ -8,7 +8,8 @@
 //     then pipe the rest. This is the same record-layer fragmentation the
 //     Windows engine uses.
 //   - UDP/53 -> resolve over DoH and write the answer back.
-//   - UDP/443 (QUIC) -> dropped, forcing apps to fall back to the fragmented TCP.
+//   - UDP/443 (QUIC) -> forwarded (kept working; not dropped), so QUIC-first
+//     sites like Google/Gemini don't stall.
 //   - other UDP -> forwarded through a protected socket.
 //
 // This is gomobile-bound (gomobile bind ./core-go/tunnel) into the .aar / the
@@ -66,6 +67,14 @@ const (
 	// this gap a DPI box can still reassemble the whole SNI/Host from one
 	// segment. One-time per connection, so the latency cost is negligible.
 	fragGap = 6 * time.Millisecond
+	// fragReplyTimeout bounds how long we wait for the server's first reply after
+	// sending a fragmented ClientHello. An immediate reset within this window
+	// means the SERVER rejected the fragmentation (not a DPI block) -> fall back
+	// to an un-fragmented retry. A timeout means slow-but-alive: keep it.
+	fragReplyTimeout = 3 * time.Second
+	// udpIdle tears down a forwarded UDP flow (e.g. QUIC) after this long with no
+	// traffic in either direction, so idle flows don't leak sockets/goroutines.
+	udpIdle = 60 * time.Second
 )
 
 // Protector is implemented by the native side (Android VpnService.protect / the
@@ -85,9 +94,10 @@ type Session struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu    sync.RWMutex
-	mode  string
-	hosts []string
+	mu     sync.RWMutex
+	mode   string
+	hosts  []string
+	noFrag map[string]bool // SNIs learned at runtime to reject fragmentation
 
 	dnsCount  atomic.Int64
 	tcpCount  atomic.Int64
@@ -131,6 +141,7 @@ func Connect(fd int, mode, excludeHostsNewlineSep string, prot Protector) (*Sess
 		cancel: cancel,
 		mode:   mode,
 		hosts:  splitHosts(excludeHostsNewlineSep),
+		noFrag: map[string]bool{},
 	}
 	// The DoH resolver MUST dial through a VPN-protected socket; otherwise its
 	// connection to the resolver (e.g. 1.0.0.1) loops back into this tunnel.
@@ -289,25 +300,25 @@ func (s *Session) handleTCP(r *tcp.ForwarderRequest) {
 func (s *Session) pipeTCP(local net.Conn, dst string) {
 	defer guard("pipeTCP")
 	defer local.Close()
-	up, err := s.dial("tcp", dst)
-	if err != nil {
-		log.Printf("[libgsm] dial tcp %s FAILED: %v", dst, err)
+
+	mode, hosts := s.snapshot()
+	first, rerr := s.readFirstPayload(local)
+	if len(first) == 0 && rerr != nil {
+		return
+	}
+
+	up, serverFirst := s.dialAndSend(dst, first, mode, hosts)
+	if up == nil {
 		return
 	}
 	defer up.Close()
 
-	mode, hosts := s.snapshot()
-	first, rerr := s.readFirstPayload(local)
-	if len(first) == 0 {
-		if rerr != nil {
-			return
-		}
-	} else {
-		if err := s.sendFirstPayload(up, first, dst, mode, hosts); err != nil {
+	// Forward any server bytes already read during the fragmentation probe.
+	if len(serverFirst) > 0 {
+		if _, err := local.Write(serverFirst); err != nil {
 			return
 		}
 	}
-
 	go func() { _, _ = io.Copy(up, local) }()
 	_, _ = io.Copy(local, up)
 }
@@ -343,36 +354,132 @@ func (s *Session) readFirstPayload(local net.Conn) ([]byte, error) {
 	return first, nil
 }
 
-// sendFirstPayload applies the DPI bypass to the opening bytes and writes them
-// upstream. TLS ClientHellos are record-fragmented through the SNI; plaintext
-// HTTP requests get their Host header split; each piece is flushed as its own
-// TCP segment (see fragGap) so the DPI never sees a whole hostname in one place.
-func (s *Session) sendFirstPayload(up net.Conn, first []byte, dst, mode string, hosts []string) error {
-	log := func(format string, args ...any) {
+// dialAndSend opens the upstream, applies the DPI bypass to the client's opening
+// bytes, and -- for a fragmented TLS ClientHello -- probes the first reply. An
+// immediate reset means the SERVER (not a DPI) rejected the fragmentation, so it
+// retries ONCE un-fragmented and remembers the host so later connections skip
+// straight to plain (the Minecraft/Microsoft-auth and datagsm.kr failure mode).
+// A timeout is slow-but-alive, kept as-is. Returns the (possibly re-dialled)
+// upstream and any server bytes already read during the probe, or (nil, nil) on
+// a hard dial/write failure.
+func (s *Session) dialAndSend(dst string, first []byte, mode string, hosts []string) (net.Conn, []byte) {
+	dlog := func(format string, args ...any) {
 		if s.dbgFrag.Add(1) <= 80 {
 			logf("[libgsm] "+format, args...)
 		}
 	}
 
-	if first[0] == 0x16 { // TLS ClientHello
-		sni := tlsfrag.SNIName(first)
-		if tlsfrag.IsHostExcluded(sni, hosts) {
-			log("TLS %s sni=%q EXCLUDED (plain)", dst, sni)
-			_, err := up.Write(first)
-			return err
+	up, err := s.dial("tcp", dst)
+	if err != nil {
+		log.Printf("[libgsm] dial tcp %s FAILED: %v", dst, err)
+		return nil, nil
+	}
+	if len(first) == 0 {
+		return up, nil
+	}
+
+	// Plaintext HTTP: split the Host header; no server-reject probe (there is no
+	// TLS handshake to reject, and splitting a Host header never breaks a server).
+	if first[0] != 0x16 {
+		if pieces, host := splitHTTPHost(first); pieces != nil {
+			dlog("HTTP %s host=%q -> %d segments", dst, host, len(pieces))
+			if writeSegments(up, pieces) != nil {
+				up.Close()
+				return nil, nil
+			}
+		} else if _, err := up.Write(first); err != nil {
+			up.Close()
+			return nil, nil
 		}
-		recs := tlsfrag.FragmentClientHello(first, mode)
-		log("TLS %s sni=%q -> %d records (helloLen=%d)", dst, sni, len(recs), len(first))
-		return writeSegments(up, recs)
+		return up, nil
 	}
 
-	if pieces, host := splitHTTPHost(first); pieces != nil { // plaintext HTTP
-		log("HTTP %s host=%q -> split into %d segments", dst, host, len(pieces))
-		return writeSegments(up, pieces)
+	// TLS ClientHello. Excluded or learned-bad hosts go out plain.
+	host := tlsfrag.SNIName(first)
+	if tlsfrag.IsHostExcluded(host, hosts) || s.isNoFrag(host) {
+		dlog("TLS %s sni=%q -> plain (excluded/no-frag)", dst, host)
+		if _, err := up.Write(first); err != nil {
+			up.Close()
+			return nil, nil
+		}
+		return up, nil
 	}
 
-	_, err := up.Write(first)
-	return err
+	recs := tlsfrag.FragmentClientHello(first, mode)
+	dlog("TLS %s sni=%q -> %d records (len=%d)", dst, host, len(recs), len(first))
+	if writeSegments(up, recs) != nil {
+		up.Close()
+		return nil, nil
+	}
+
+	serverFirst, verdict := peekReply(up)
+	if verdict != replyReset {
+		return up, serverFirst // data, or slow-but-alive -> keep the fragmented conn
+	}
+
+	// Immediate reset: the server rejected the fragments. Retry ONCE plain, and
+	// only learn the host as no-frag if the plain retry actually gets data (else
+	// it's a DPI/IP block and we should keep fragmenting future connections).
+	dlog("TLS %s sni=%q -> fragmentation rejected; retrying un-fragmented", dst, host)
+	up.Close()
+	up, err = s.dial("tcp", dst)
+	if err != nil {
+		return nil, nil
+	}
+	if _, err := up.Write(first); err != nil {
+		up.Close()
+		return nil, nil
+	}
+	serverFirst, verdict = peekReply(up)
+	if verdict == replyData {
+		s.rememberNoFrag(host)
+		dlog("TLS %s sni=%q -> works un-fragmented; will skip fragmentation", dst, host)
+	}
+	return up, serverFirst
+}
+
+// replyVerdict classifies the server's first response after a fragmented hello.
+type replyVerdict int
+
+const (
+	replyData    replyVerdict = iota // server replied -> handshake accepted
+	replyTimeout                     // no reply yet, connection alive -> keep it
+	replyReset                       // reset/EOF -> server rejected the fragments
+)
+
+// peekReply reads the first server bytes with fragReplyTimeout. The bytes are
+// returned so the caller can forward them (the stream continues after them).
+func peekReply(up net.Conn) ([]byte, replyVerdict) {
+	up.SetReadDeadline(time.Now().Add(fragReplyTimeout))
+	buf := make([]byte, 65535)
+	n, err := up.Read(buf)
+	up.SetReadDeadline(time.Time{})
+	if n > 0 {
+		return append([]byte(nil), buf[:n]...), replyData
+	}
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		return nil, replyTimeout
+	}
+	return nil, replyReset
+}
+
+// isNoFrag / rememberNoFrag track SNIs that a server rejects fragmentation for.
+func (s *Session) isNoFrag(host string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.noFrag[host]
+}
+
+func (s *Session) rememberNoFrag(host string) {
+	if host == "" || strings.HasPrefix(host, "<") { // skip <no-sni>/<empty>
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.noFrag == nil {
+		s.noFrag = map[string]bool{}
+	}
+	s.noFrag[host] = true
 }
 
 // writeSegments writes each piece and pauses briefly between them so the kernel
@@ -429,15 +536,11 @@ func looksLikeHTTP(req []byte) bool {
 	return false
 }
 
-// --- UDP: DoH for :53, drop :443 (QUIC), forward the rest --------------------
+// --- UDP: DoH for :53, forward the rest (incl. :443 QUIC) --------------------
 
 func (s *Session) handleUDP(r *udp.ForwarderRequest) bool {
 	defer guard("handleUDP")
 	id := r.ID()
-	if id.LocalPort == 443 {
-		s.quicCount.Add(1)
-		return true // QUIC -> drop (forces TCP fallback, which we fragment)
-	}
 	var wq waiter.Queue
 	ep, terr := r.CreateEndpoint(&wq)
 	if terr != nil {
@@ -448,6 +551,15 @@ func (s *Session) handleUDP(r *udp.ForwarderRequest) bool {
 	if id.LocalPort == 53 {
 		go s.handleDNS(conn)
 	} else {
+		// UDP/443 is QUIC/HTTP3. We FORWARD it (not drop) so sites that were
+		// reachable without the tunnel -- especially Google/Gemini, which strongly
+		// prefer QUIC -- keep working instead of stalling on a dropped QUIC handshake.
+		// A blocked site's QUIC either gets reset by the school DPI (browser then
+		// falls back to our fragmented TCP) or slips through if QUIC isn't
+		// inspected. Matches the desktop engine's QUIC-allowed default.
+		if id.LocalPort == 443 {
+			s.quicCount.Add(1)
+		}
 		go s.pipeUDP(conn, net.JoinHostPort(addrString(id.LocalAddress), strconv.Itoa(int(id.LocalPort))))
 	}
 	return true
@@ -481,8 +593,32 @@ func (s *Session) pipeUDP(conn net.Conn, dst string) {
 		return
 	}
 	defer up.Close()
-	go func() { _, _ = io.Copy(up, conn) }()
-	_, _ = io.Copy(conn, up)
+
+	// Forward datagrams both ways with an idle timeout. Unlike TCP, a UDP flow
+	// has no EOF, so without this every QUIC flow (and browsing spawns many)
+	// would leak its socket + goroutines until the whole tunnel stops. When
+	// either side goes idle past udpIdle, we tear the flow down; the app just
+	// re-establishes if it still needs it.
+	done := make(chan struct{}, 2)
+	copyUDP := func(dst, src net.Conn) {
+		defer func() { done <- struct{}{} }()
+		buf := make([]byte, 65535)
+		for {
+			_ = src.SetReadDeadline(time.Now().Add(udpIdle))
+			n, rerr := src.Read(buf)
+			if n > 0 {
+				if _, werr := dst.Write(buf[:n]); werr != nil {
+					return
+				}
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}
+	go copyUDP(up, conn)
+	go copyUDP(conn, up)
+	<-done // first side to idle/error tears down the flow (defers close both)
 }
 
 // --- helpers -----------------------------------------------------------------
