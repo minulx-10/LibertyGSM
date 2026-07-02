@@ -19,7 +19,7 @@ try:
 except Exception:
     _HAS_TRAY = False
 
-VERSION = "1.3.2"
+VERSION = "1.3.4"
 
 
 def _make_tray_image(size=64):

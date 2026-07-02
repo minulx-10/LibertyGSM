@@ -10,8 +10,8 @@ non-Windows hosts can run the portable local proxy preview.
 | Platform | Release status | Packet engine | Notes |
 | --- | --- | --- | --- |
 | Windows 10/11 | Supported | WinDivert via `pydivert` | Current production path. Requires Administrator. |
-| macOS | Preview | Portable local proxy | Requires manual HTTP/HTTPS proxy settings. Full-system mode still needs a signed Network Extension target and device testing. |
-| Linux desktop | Preview | Portable local proxy | Requires manual HTTP/HTTPS proxy settings. Full-system mode needs a TUN/netfilter backend. |
+| macOS | Supported (browsers) | Portable local proxy + auto system-proxy | Local proxy (TLS fragmentation + DoH); the system HTTP/HTTPS proxy is auto-set via `networksetup` on start and restored on stop, so browsers work with no manual setup. Apps that ignore the OS proxy aren't covered — full all-app transparent mode still needs a signed Network Extension. |
+| Linux desktop | Supported (browsers) | Portable local proxy + auto system-proxy | Same, with the GNOME proxy auto-configured via `gsettings` (falls back to a manual-config hint on non-GNOME). Full all-app mode needs a TUN/netfilter backend. |
 | Android | Supported (5.0+/API 21) | `VpnService` / TUN + Go core (`core-go/tunnel`) | System-wide, all apps. Go gVisor netstack drives the TUN fd; DoH for DNS, TLS ClientHello record fragmentation, QUIC dropped to TCP. Tested on a real device on a filtered school network. |
 | iOS | Compiles (CI-verified), not device-tested | `NEPacketTunnelProvider` + Go core (`core-go/tunnel`) | Swift extension + container app + xcframework in `apple/` reuse the same Go core as Android. The `ios-build` GitHub Actions workflow builds the Go core into an xcframework (gomobile) and compiles the app + extension on a macOS runner — **green**. Installing on a real device still needs a Mac + paid Apple Developer account (packet-tunnel entitlement); the runtime `// VERIFY:` items in `apple/README.md` are unconfirmed. |
 | iPadOS | Compiles (CI-verified), not device-tested | `NEPacketTunnelProvider` + Go core | Same universal target as iOS. |

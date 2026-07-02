@@ -11,6 +11,7 @@ import time
 
 from .base import EngineInfo, EventCallback, LogCallback
 from bypass_proxy import BypassProxyServer
+from system_proxy import SystemProxy
 
 
 HOST = "127.0.0.1"
@@ -52,6 +53,9 @@ class PortableProxyEngine:
         )
         self.stats = self.server.stats
         self.running = False
+        # Auto-configures the OS proxy on macOS/Linux so browsers use us without
+        # manual setup; reverted on stop. No-op / best-effort elsewhere.
+        self._sysproxy = SystemProxy(HOST, PORT, log=self._sysproxy_log)
 
     @property
     def mode(self) -> str:
@@ -67,18 +71,27 @@ class PortableProxyEngine:
         if self.log_callback:
             self.log_callback(f"[{time.strftime('%H:%M:%S')}] [{level}] {message}")
 
+    def _sysproxy_log(self, message: str, level: str = "SYSTEM") -> None:
+        self._log(message, level)
+
     def start(self) -> bool:
         self.server.bypass_mode = self.mode
         ok = self.server.start()
         self.running = ok
         if ok:
-            self._log(
-                f"Local proxy mode active on {PROXY_ADDRESS}. "
-                "Configure HTTP and HTTPS proxy settings manually for apps you want covered."
-            )
+            # Point the OS proxy at us so browsers are covered automatically.
+            if self._sysproxy.apply():
+                self._log(f"Local proxy active on {PROXY_ADDRESS} — system proxy auto-configured.")
+            else:
+                self._log(
+                    f"Local proxy active on {PROXY_ADDRESS}. Auto-config unavailable; "
+                    "set HTTP+HTTPS proxy to this address for apps you want covered."
+                )
         return ok
 
     def stop(self) -> None:
+        # Restore the OS proxy first so the browser isn't left pointing at a dead port.
+        self._sysproxy.revert()
         self.server.stop()
         self.running = False
 

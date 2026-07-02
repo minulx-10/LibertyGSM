@@ -8,8 +8,9 @@ from .base import DiagnosticLogCallback, EngineInfo, EventCallback, LogCallback,
 
 
 _MACOS_REASON = (
-    "macOS full-system mode still needs a Network Extension/Packet Tunnel backend. "
-    "Using portable local proxy mode for now."
+    "Browsers are covered automatically — the system HTTP/HTTPS proxy is pointed "
+    "at the local proxy on start and restored on stop. Full all-app transparent "
+    "mode still needs a Network Extension/Packet Tunnel backend."
 )
 _IOS_REASON = (
     "iOS/iPadOS support needs an NEPacketTunnelProvider app extension and Apple entitlements. "
@@ -20,8 +21,9 @@ _ANDROID_REASON = (
     "The packet engine is not implemented yet."
 )
 _LINUX_REASON = (
-    "Linux full-system mode needs a TUN/netfilter backend. "
-    "Using portable local proxy mode for now."
+    "Browsers/GNOME apps are covered automatically — the GNOME proxy is pointed "
+    "at the local proxy on start and restored on stop. Full all-app transparent "
+    "mode needs a TUN/netfilter backend."
 )
 _GENERIC_REASON = "No packet engine is implemented for this platform yet."
 
