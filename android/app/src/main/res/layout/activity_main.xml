@@ -18,7 +18,7 @@
         android:id="@+id/version"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="v1.3.1"
+        android:text="v1.3.3"
         android:textSize="13sp"
         android:alpha="0.6"
         android:layout_marginTop="2dp" />
